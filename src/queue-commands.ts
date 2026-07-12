@@ -46,8 +46,11 @@ function completions(prefix: string) {
     }));
   }
 
-  const subcommand = trimmed.split(/\s+/)[0] ?? "";
-  if (!subcommand || SUBCOMMANDS.some((c) => c.startsWith(subcommand))) {
+  const parts = trimmed.split(/\s+/);
+  const subcommand = parts[0]?.toLowerCase() ?? "";
+
+  // Still typing the subcommand itself (no space yet) — offer subcommand completions
+  if (parts.length === 1) {
     return SUBCOMMANDS.filter((cmd) => cmd.startsWith(subcommand)).map((cmd) => ({
       value: cmd,
       label: cmd,
@@ -55,8 +58,9 @@ function completions(prefix: string) {
     }));
   }
 
-  if (subcommand === "commit" || subcommand === "summarize") {
-    const arg = trimmed.split(/\s+/)[1] ?? "";
+  // Subcommand is fully typed; offer argument completions for commit/summarize
+  if ((subcommand === "commit" || subcommand === "summarize") && parts.length === 2) {
+    const arg = parts[1] ?? "";
     return ["on", "off"]
       .filter((a) => a.startsWith(arg))
       .map((a) => ({
@@ -66,6 +70,7 @@ function completions(prefix: string) {
       }));
   }
 
+  // Subcommand + arguments already typed; stay out of the way
   return [];
 }
 
