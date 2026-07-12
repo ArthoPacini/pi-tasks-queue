@@ -195,6 +195,11 @@ export function createGoalRuntimeController(pi: ExtensionAPI): GoalRuntimeContro
 
 export function registerGoalRuntimeController(pi: ExtensionAPI): void {
   const controller = createGoalRuntimeController(pi);
+  registerRuntimeController(pi, controller);
+}
+
+/** Register tools, commands, and events for an externally-created controller instance. */
+export function registerRuntimeController(pi: ExtensionAPI, controller: GoalRuntimeController): void {
   registerGoalTools(pi, {
     getGoal: () => controller.getGoalForDisplay(),
     setGoal: controller.setGoal.bind(controller),

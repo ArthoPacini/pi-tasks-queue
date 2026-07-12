@@ -1,0 +1,35 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+import { createQueueRuntimeController, type QueueRuntimeController } from "./queue-runtime-controller.js";
+import { registerQueueCommand } from "./queue-commands.js";
+import { registerQueueTool } from "./queue-tools.js";
+import type { GoalRuntimeController } from "./goal-runtime-controller.js";
+
+export function registerQueueOrchestrator(pi: ExtensionAPI, goalController: GoalRuntimeController): void {
+  const flag = pi.getFlag?.("project-root");
+  const projectRoot = typeof flag === "string" ? flag : process.cwd();
+  const controller = createQueueRuntimeController({
+    pi,
+    goalController,
+    projectRoot,
+  });
+
+  // Register the read-only tool
+  registerQueueTool(pi, () => controller.getQueueState());
+
+  // Register /queue commands
+  registerQueueCommand(pi, {
+    getQueueState: controller.getQueueState,
+    updateQueueState: controller.updateQueueState,
+    persistQueueState: controller.persistQueueState,
+  });
+}
+
+/** Used by tests — creates the controller without registering commands/tools. */
+export function createQueueRuntimeControllerForTesting(
+  pi: ExtensionAPI,
+  goalController: GoalRuntimeController,
+  projectRoot: string,
+): QueueRuntimeController {
+  return createQueueRuntimeController({ pi, goalController, projectRoot });
+}
