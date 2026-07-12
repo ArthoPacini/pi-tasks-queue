@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import test from "node:test";
 
 import { handleQueueCommand } from "../src/queue-commands.js";
@@ -19,6 +20,7 @@ interface TestQueueHost {
   getQueueState(): QueueState;
   updateQueueState(transform: (state: QueueState) => QueueState): QueueState;
   persistQueueState(): void;
+  start(ctx: ExtensionContext): void;
 }
 
 function createTestHost(initial: QueueState = createQueueState()): TestQueueHost {
@@ -30,6 +32,9 @@ function createTestHost(initial: QueueState = createQueueState()): TestQueueHost
       return state;
     },
     persistQueueState: () => {},
+    start: () => {
+      state = setRunState(state, "running");
+    },
   };
 }
 

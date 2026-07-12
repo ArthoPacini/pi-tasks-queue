@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import { createQueuePersistence, type QueuePersistence } from "./queue-persistence.js";
 import type { QueueState } from "./queue-types.js";
@@ -34,6 +34,11 @@ export interface QueueRuntimeController {
   updateQueueState(transform: (state: QueueState) => QueueState): QueueState;
   /** Persist current state to disk. */
   persistQueueState(): void;
+  /**
+   * Set runState to "running" and immediately kick off the active task.
+   * Called by the /queue start command handler.
+   */
+  start(ctx: ExtensionContext): void;
 }
 
 export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): QueueRuntimeController {
@@ -98,12 +103,19 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     );
   };
 
-  /** Start the active task if the queue is running and no active goal exists. */
-  const startActiveTaskIfNeeded = (ctx: ExtensionContext): void => {
+  /**
+   * Set runState to "running" and kick off the active task immediately.
+   */
+  const start = (ctx: ExtensionContext): void => {
+    queueState = setRunState(queueState, "running");
+    startKickoff(ctx);
+  };
+
+  /** Kick off the active task when runState is running. */
+  const startKickoff = (ctx: ExtensionContext): void => {
     if (queueState.runState !== "running") {
       return;
     }
-
     const goal = deps.goalController.getGoalForDisplay();
 
     const activeTask = queueState.tasks[queueState.cursor];
@@ -131,9 +143,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       return;
     }
 
-    // Mark task started
-    const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown";
-    const started = markTaskStarted(queueState, sessionId);
+    const started = markTaskStarted(queueState, "unknown");
     if (!started.ok || !started.state) {
       return;
     }
@@ -252,11 +262,11 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
   // Register event handlers — these get plain ExtensionContext, not ExtensionCommandContext
   deps.pi.on("session_start", (_event: object, ctx: ExtensionContext) => {
-    startActiveTaskIfNeeded(ctx);
+    startKickoff(ctx);
   });
 
   deps.pi.on("session_tree", (_event: object, ctx: ExtensionContext) => {
-    startActiveTaskIfNeeded(ctx);
+    startKickoff(ctx);
   });
 
   deps.pi.on("agent_end", (_event: object, ctx: ExtensionContext) => {
@@ -267,5 +277,6 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     getQueueState: () => queueState,
     updateQueueState,
     persistQueueState,
+    start,
   };
 }

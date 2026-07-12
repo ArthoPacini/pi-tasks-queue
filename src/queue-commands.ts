@@ -15,7 +15,7 @@ import {
   startQueue,
 } from "./queue-state.js";
 
-type QueueCommandHost = Pick<QueueRuntimeController, "getQueueState" | "updateQueueState" | "persistQueueState">;
+type QueueCommandHost = Pick<QueueRuntimeController, "getQueueState" | "updateQueueState" | "persistQueueState" | "start">;
 
 export interface QueueCommandContext {
   hasUI: boolean;
@@ -94,7 +94,7 @@ function parseIndex(arg: string): number | null {
 export async function handleQueueCommand(
   host: QueueCommandHost,
   args: string,
-  ctx: QueueCommandContext,
+  ctx: QueueCommandContext | ExtensionCommandContext,
 ): Promise<void> {
   const cmd = firstArg(args);
   const rest = restOfArgs(args);
@@ -131,7 +131,8 @@ export async function handleQueueCommand(
         ctx.ui.notify(result.message, "warning");
         return;
       }
-      host.updateQueueState((state) => setRunState(state, "running"));
+      // Pass the full command context to start (it has ExtensionContext's required properties)
+      host.start(ctx as Parameters<typeof host.start>[0]);
       host.persistQueueState();
       ctx.ui.notify("Queue started.");
       break;
@@ -256,7 +257,7 @@ export function registerQueueCommand(pi: ExtensionAPI, host: QueueCommandHost): 
       return completions(argumentPrefix.trim());
     },
     async handler(args: string, ctx: ExtensionCommandContext) {
-      await handleQueueCommand(host, args, ctx);
+      await handleQueueCommand(host, args, ctx as Parameters<typeof handleQueueCommand>[2]);
     },
   });
 }

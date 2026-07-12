@@ -22,6 +22,7 @@ export function registerQueueOrchestrator(pi: ExtensionAPI, goalController: Goal
     getQueueState: controller.getQueueState,
     updateQueueState: controller.updateQueueState,
     persistQueueState: controller.persistQueueState,
+    start: controller.start,
   });
 }
 
