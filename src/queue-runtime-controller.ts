@@ -244,8 +244,9 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       return;
     }
 
+    // Kick off the next task immediately
     persistQueueState();
-    refreshUi(ctx);
+    startKickoff(ctx);
   };
 
   const handleTaskPaused = (ctx: ExtensionContext, reason: string): void => {
