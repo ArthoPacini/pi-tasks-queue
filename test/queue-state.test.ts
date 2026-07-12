@@ -105,7 +105,7 @@ test("removeTask rejects active and complete tasks", () => {
   assert.ok(started.ok);
   assert.equal(removeTask(started.state!, 0, 103).ok, false);
 
-  const completed = markTaskComplete(started.state!, 104);
+  const completed = markTaskComplete(started.state!, { now: 104 });
   assert.ok(completed.ok);
   assert.equal(removeTask(completed.state!, 0, 105).ok, false);
 });
@@ -200,16 +200,16 @@ test("markTaskStarted requires pending status", () => {
 
 test("markTaskComplete requires active status", () => {
   const state = createQueueState(0);
-  assert.equal(markTaskComplete(state).ok, false);
+  assert.equal(markTaskComplete(state, {}).ok, false);
 
   const t1 = createQueueTask("task1");
   const withTask = appendTask(state, t1);
-  assert.equal(markTaskComplete(withTask).ok, false);
+  assert.equal(markTaskComplete(withTask, {}).ok, false);
 
   const started = markTaskStarted(withTask, "s1", 1);
   assert.ok(started.ok);
 
-  const completed = markTaskComplete(started.state!, 2);
+  const completed = markTaskComplete(started.state!, { now: 2 });
   assert.ok(completed.ok);
   assert.equal(completed.state?.tasks[0]?.status, "complete");
   assert.equal(completed.state?.tasks[0]?.completedAt, 2);
@@ -414,7 +414,7 @@ test("multiple tasks advance through full lifecycle", () => {
   state = started1.state!;
 
   // Complete task 1
-  const completed1 = markTaskComplete(state, 5);
+  const completed1 = markTaskComplete(state, { now: 5 });
   assert.ok(completed1.ok);
   state = completed1.state!;
 
@@ -444,7 +444,7 @@ test("multiple tasks advance through full lifecycle", () => {
   const started3 = markTaskStarted(state, "s3", 10);
   assert.ok(started3.ok);
   state = started3.state!;
-  const completed3 = markTaskComplete(state, 11);
+  const completed3 = markTaskComplete(state, { now: 11 });
   assert.ok(completed3.ok);
   state = completed3.state!;
 

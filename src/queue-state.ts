@@ -69,6 +69,7 @@ export function createQueueTask(
     commitSha: null,
     commitWarning: null,
     summary: null,
+    tokensUsed: 0,
   };
 }
 
@@ -216,7 +217,8 @@ export function markTaskStarted(
   };
 }
 
-export function markTaskComplete(state: QueueState, now = unixSeconds()): QueueStateResult {
+export function markTaskComplete(state: QueueState, options: { tokensUsed?: number; now?: number } = {}): QueueStateResult {
+  const now = options.now ?? unixSeconds();
   const task = activeTask(state);
   if (!task) {
     return { ok: false, message: "No active task to complete.", state: null };
@@ -231,7 +233,7 @@ export function markTaskComplete(state: QueueState, now = unixSeconds()): QueueS
 
   const nextTasks = state.tasks.map((t) =>
     t.taskId === task.taskId
-      ? { ...t, status: "complete" as const, completedAt: now }
+      ? { ...t, status: "complete" as const, completedAt: now, tokensUsed: options.tokensUsed ?? t.tokensUsed }
       : t,
   );
 

@@ -198,13 +198,17 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   const handleTaskComplete = async (ctx: ExtensionContext): Promise<void> => {
     const taskIndex = queueState.cursor;
 
-    // Mark complete
-    const completed = markTaskComplete(queueState);
+    // Capture token usage from the completed goal
+    const goal = deps.goalController.getGoalForDisplay();
+    const tokensUsed = goal?.usage?.tokensUsed ?? 0;
+
+    // Mark complete with token usage
+    const completed = markTaskComplete(queueState, { tokensUsed });
     if (!completed.ok || !completed.state) {
       return;
     }
     queueState = completed.state;
-    appendAuditEntry("task_completed", { taskId: queueState.tasks[taskIndex]?.taskId, cursor: taskIndex });
+    appendAuditEntry("task_completed", { taskId: queueState.tasks[taskIndex]?.taskId, cursor: taskIndex, tokensUsed });
 
     // Commit between tasks
     if (queueState.settings.commitBetweenTasks) {
@@ -241,6 +245,12 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       appendAuditEntry("queue_complete", {});
       persistQueueState();
       refreshUi(ctx);
+      // Auto-show summary on completion via notification
+      try {
+        ctx.ui.setStatus("pi-queue", "Queue complete.");
+      } catch {
+        // ignore
+      }
       return;
     }
 

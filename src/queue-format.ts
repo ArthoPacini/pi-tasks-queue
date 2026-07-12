@@ -1,4 +1,4 @@
-import { formatDuration, formatTokenValue } from "./format.js";
+import { formatCompactTokenValue, formatDuration } from "./format.js";
 import type { QueueRunState, QueueState, QueueTask, QueueTaskStatus } from "./queue-types.js";
 
 const BOX_WIDTH = 75;
@@ -31,24 +31,69 @@ function taskStatusMarker(status: QueueTaskStatus): string {
   }
 }
 
+function taskDuration(task: QueueTask): string {
+  if (task.status !== "complete" && task.status !== "failed" && task.status !== "skipped") {
+    return "";
+  }
+  if (task.startedAt === null || task.completedAt === null) {
+    return "";
+  }
+  return formatDuration(Math.max(0, task.completedAt - task.startedAt));
+}
+
+function taskTokens(task: QueueTask): string {
+  if (task.tokensUsed <= 0) {
+    return "";
+  }
+  return formatCompactTokenValue(task.tokensUsed);
+}
+
 function taskSummaryLine(task: QueueTask, index: number): string {
   const marker = taskStatusMarker(task.status);
-  const parts: string[] = [];
+  const duration = taskDuration(task);
+  const tokens = taskTokens(task);
 
-  parts.push(`  ${marker} Task ${index + 1}: ${task.objective}`);
+  let meta = "";
+  if (duration && tokens) {
+    meta = ` (${duration}, ${tokens})`;
+  } else if (duration) {
+    meta = ` (${duration})`;
+  } else if (tokens) {
+    meta = ` (${tokens})`;
+  }
+
+  let line = `  ${marker} Task ${index + 1}${meta}: ${task.objective}`;
 
   if (task.commitSha) {
-    parts.push(` (Commit: ${task.commitSha.slice(0, 7)})`);
+    line += ` (Commit: ${task.commitSha.slice(0, 7)})`;
   }
   if (task.commitWarning) {
-    parts.push(` (warning: ${task.commitWarning})`);
+    line += ` (warning: ${task.commitWarning})`;
   }
   if (task.summary) {
     const short = task.summary.length > 50 ? `${task.summary.slice(0, 47)}...` : task.summary;
-    parts.push(` // ${short}`);
+    line += ` // ${short}`;
   }
 
-  return parts.join("");
+  return line;
+}
+
+function totalDuration(state: QueueState): string {
+  let total = 0;
+  for (const task of state.tasks) {
+    if (task.startedAt !== null && task.completedAt !== null) {
+      total += task.completedAt - task.startedAt;
+    }
+  }
+  return formatDuration(total);
+}
+
+function totalTokens(state: QueueState): number {
+  let total = 0;
+  for (const task of state.tasks) {
+    total += task.tokensUsed;
+  }
+  return total;
 }
 
 export function formatQueueStatusBox(state: QueueState): string {
@@ -72,6 +117,7 @@ export function formatQueueStatusBox(state: QueueState): string {
     }
   }
 
+  // Active goal section
   const active = state.tasks[state.cursor];
   if (active) {
     lines.push(SEPARATOR);
@@ -81,12 +127,17 @@ export function formatQueueStatusBox(state: QueueState): string {
       active.startedAt !== null ? Math.max(0, Math.floor(Date.now() / 1000) - active.startedAt) : 0,
     );
 
-    if (active.tokenBudget !== null) {
-      lines.push(`  Status:  ${active.status} (Budget: ${formatTokenValue(0)} / ${formatTokenValue(active.tokenBudget)} tokens)`);
-    } else {
-      lines.push(`  Status:  ${active.status}`);
-    }
+    lines.push(`  Status:  ${active.status}`);
     lines.push(`  Time:    ${timeStr}`);
+  }
+
+  // Totals row (show even when idle/running)
+  if (state.tasks.length > 0) {
+    const completeCount = state.tasks.filter((t) => t.status === "complete" || t.status === "failed" || t.status === "skipped").length;
+    if (completeCount > 0) {
+      lines.push(SEPARATOR);
+      lines.push(`  Total Time: ${totalDuration(state)}${" ".repeat(Math.max(1, BOX_WIDTH - 52 - totalDuration(state).length))}Total Tokens: ${formatCompactTokenValue(totalTokens(state))}`);
+    }
   }
 
   lines.push(DIVIDER);
@@ -107,27 +158,18 @@ export function formatQueueFooterStatus(state: QueueState): string | undefined {
     (t) => t.status === "pending" || t.status === "active",
   ).length;
 
-  const parts: string[] = [];
-
   if (state.runState === "idle" && remaining === 0) {
-    parts.push(`Queue complete (${completed}/${total})`);
-  } else if (state.runState === "paused") {
-    parts.push(`Queue paused (${completed}/${total})`);
-  } else {
-    parts.push(`Queue (${completed}/${total}`);
-    if (skipped > 0) parts.push(`${skipped} skipped`);
-    if (failed > 0) parts.push(`${failed} failed`);
-    if (remaining > 0) parts.push(`${remaining} remaining`);
-    parts.push(")");
-    if (parts.length > 1) {
-      // Flatten the parts
-      const count = completed;
-      const tail = parts.slice(1).join(", ");
-      return `Queue ${count}/${total} (${tail})`;
-    }
+    return `Queue complete (${completed}/${total})`;
   }
-
-  return parts.join(" ");
+  if (state.runState === "paused") {
+    return `Queue paused (${completed}/${total})`;
+  }
+  // Running or idle with remaining
+  const parts = [`Queue ${completed}/${total}`];
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (remaining > 0) parts.push(`${remaining} remaining`);
+  return parts.join(", ");
 }
 
 export function formatQueueTaskStatusList(state: QueueState): string {

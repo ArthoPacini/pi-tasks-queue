@@ -16,6 +16,7 @@ export interface QueueTask {
   commitSha: string | null;
   commitWarning: string | null;
   summary: string | null;
+  tokensUsed: number;
 }
 
 export interface QueueSettings {
