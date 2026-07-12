@@ -197,3 +197,116 @@ While a goal is active, the extension:
 - shows Codex-style status labels with compact token or elapsed-time usage in the pi footer when UI is available
 
 Token counts are formatted with commas and compact abbreviations, for example `123M (123,456,789) tokens`. Token totals use pi's completed assistant turn input plus output usage. Cache read and cache write channels are excluded because they are provider cache accounting fields, not extra sent and received text tokens. Pi does not currently expose a separate extension usage total for automatic compaction summary calls.
+
+## pi-queue: Multi-task orchestration
+
+This package also includes `pi-queue`, a sequential multi-task orchestration layer built on top of the single-goal engine. It turns the single Codex-style goal into a **queue of tasks pursued one after another**: pop task 1, drive it to completion, then automatically move on to task 2, and so on.
+
+### Quick start
+
+```text
+/queue add implement bubble sort in python
+/queue add implement linear search in python
+/queue add implement binary search in python
+/queue start
+```
+
+The queue runs each task through the same continuation loop as `/goal <objective>` — the agent reads files, writes code, verifies, and calls `update_goal` to mark each task complete. When a task finishes, the queue automatically advances to the next pending task.
+
+### Commands
+
+```text
+/queue add <objective>       Append a pending task to the queue
+/queue list                  Show the queue status box with per-task elapsed time and tokens
+/queue status                Alias for /queue list
+/queue start                 Start the queue runner (kicks off task 1 immediately)
+/queue pause                 Pause the queue runner (does not pause the current goal)
+/queue resume                Resume a paused queue
+/queue skip                  Mark the current task as skipped and advance to the next
+/queue remove <index>        Remove a pending task by 1-based index
+/queue clear                 Clear all tasks (requires confirmation)
+/queue commit on|off         Toggle auto-commit (git add + git commit between tasks, default off)
+/queue summarize on|off      Toggle auto-summarize (captures a task summary via ctx.compact, default off)
+```
+
+### Status display
+
+`/queue list` shows an ASCII status box:
+
+```
+===========================================================================
+  PI-QUEUE ORCHESTRATOR                                            [ IDLE ]
+===========================================================================
+  [ QUEUE STATE ]
+  [x] Task 1 (12m 34s, 53k): implement bubble sort in python
+  [x] Task 2 (1h 21m 21s, 893k): implement linear search in python
+  [ ] Task 3: implement binary search in python
+---------------------------------------------------------------------------
+  Total Time: 1h 33m 55s            Total Tokens: 946k
+===========================================================================
+```
+
+The footer shows a one-line status summary (`Queue 2/3, 1 remaining`) updated live while the queue is running.
+
+### Model tools
+
+`get_queue_status` — read-only. Returns the full queue state (tasks, cursor, settings, run state) as JSON. The model can tell the user how many tasks remain but **cannot** mutate the queue. All queue mutations are operator slash commands — the same philosophy as `update_goal` completion claims: the model must provide evidence-backed completion before the queue advances.
+
+### Toggles: commit between tasks
+
+When `commit on` is set (default `off`), after each task completes the queue runs:
+
+1. `git status --porcelain` — skip if nothing to commit
+2. `git add -A`
+3. `git commit -m "pi-queue: <truncated objective>"`
+4. `git rev-parse HEAD` — recorded on the task record
+
+Commit messages are derived from the task objective (never from the LLM in-band). A failed commit does not block the queue — it records a warning on the task record that shows up in `/queue list`.
+
+### Toggles: summarize between tasks
+
+When `summarize on` is set (default `off`), after each task completes the queue calls `ctx.compact()` (the same host-provided summarization mechanism used for proactive compaction) with custom instructions asking for key decisions, touched files, remaining issues, and anything a fresh agent would need. The captured summary is prepended to the next task's startup prompt as a `<pi_queue_prior_context task_id="...">` XML fragment. If the toggle is off, the next task starts with no injected prior context.
+
+### Persistence
+
+Queue state is stored as JSON on disk at `<projectRoot>/.pi/pi-queue/queue.json`. Writes are atomic (write to a temp file in the same directory, then rename). A monotonic `revision` counter protects against concurrent-writer conflicts: `save` refuses to write if the on-disk revision is newer than the last loaded revision. Lightweight audit entries are also appended to the current session for local debugging but are never the source of truth for cursor or task data.
+
+Each task gets its own fresh session context — the queue does not drag accumulated context from prior tasks forward. When the summarize toggle is on, a compact natural-language summary bridges the gap instead.
+
+### Task lifecycle
+
+1. **pending** — enqueued, waiting to run
+2. **active** — currently being pursued by the agent (has an active `ThreadGoal`)
+3. **complete** — the agent called `update_goal` with `status: "complete"`
+4. **failed** — the goal ended in an unrecoverable state (future use)
+5. **skipped** — skipped via `/queue skip`
+
+When a task completes, the queue:
+- Captures the completed goal's token usage onto the task record
+- Marks the task `complete`
+- Runs the commit flow (if enabled)
+- Runs the summarize flow (if enabled)
+- Advances the cursor to the next pending task
+- Calls `startKickoff` to create the goal and queue a continuation turn
+
+When a task's goal becomes `paused` or `budgetLimited` (provider limit, abort, recovery-pending), the queue pauses its runner and surfaces the status in the UI. It does **not** silently skip past the stuck task — the user must resolve the goal (`/goal resume`, `/queue skip`, `/queue retry`) before the queue advances.
+
+### Architecture
+
+| Module | Responsibility |
+|--------|----------------|
+| `src/queue-types.ts` | `QueueState`, `QueueTask`, `QueueSettings` types |
+| `src/queue-state.ts` | Pure state transition functions (add, remove, advance, mark, toggle) |
+| `src/queue-persistence.ts` | Atomic file-based load/save with revision conflict detection |
+| `src/queue-format.ts` | ASCII status box and one-line footer formatter |
+| `src/queue-git.ts` | Git commit flow via injected exec, never throws |
+| `src/queue-summarize.ts` | `ctx.compact()` wrapper for task-to-task summaries |
+| `src/queue-runtime-controller.ts` | Orchestrator: session events, goal transitions, auto-advance |
+| `src/queue-commands.ts` | `/queue ...` command and argument completions |
+| `src/queue-tools.ts` | `get_queue_status` read-only tool |
+
+Design constraints:
+
+- **No LLM-side queue mutation** — only one read-only tool (`get_queue_status`) is exposed. All mutations are operator slash commands.
+- **Composition over duplication** — the queue composes with `GoalRuntimeController` through its public surface (`setGoal`, `getGoalForDisplay`). No forking of `state.ts` / `goal-transition.ts` / `recovery-machine.ts`.
+- **Fresh sessions per task** — the source of truth is file-based (`queue.json`), not session-branch custom entries, so it survives `ctx.newSession()`.
