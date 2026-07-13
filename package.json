@@ -3,7 +3,7 @@
   "version": "0.1.35",
   "description": "Multi-task sequential queue for pi. Drives one task at a time, auto-advances, with optional git commits and summaries between tasks.",
   "type": "module",
-  "author": "Mitch Fultz (https://github.com/fitchmultz)",
+  "author": "Arthô Pacini (https://github.com/ArthoPacini)",
   "license": "MIT",
   "main": "src/index.ts",
   "files": [
