@@ -1,7 +1,7 @@
 {
-  "name": "pi-codex-goal",
+  "name": "pi-tasks-queue",
   "version": "0.1.35",
-  "description": "Codex-style goal tracking and continuation for pi.",
+  "description": "Multi-task sequential queue for pi. Drives one task at a time, auto-advances, with optional git commits and summaries between tasks.",
   "type": "module",
   "author": "Mitch Fultz (https://github.com/fitchmultz)",
   "license": "MIT",
@@ -23,17 +23,18 @@
     "pi",
     "pi-extension",
     "extension",
-    "codex",
-    "goal"
+    "queue",
+    "tasks",
+    "orchestration"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fitchmultz/pi-codex-goal.git"
+    "url": "git+https://github.com/ArthoPacini/pi-tasks-queue.git"
   },
   "bugs": {
-    "url": "https://github.com/fitchmultz/pi-codex-goal/issues"
+    "url": "https://github.com/ArthoPacini/pi-tasks-queue/issues"
   },
-  "homepage": "https://github.com/fitchmultz/pi-codex-goal#readme",
+  "homepage": "https://github.com/ArthoPacini/pi-tasks-queue#readme",
   "pi": {
     "extensions": [
       "./src/index.ts"
