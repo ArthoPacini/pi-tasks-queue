@@ -275,6 +275,9 @@ export function skipCurrentTask(state: QueueState, now = unixSeconds()): QueueSt
   if (!task) {
     return { ok: false, message: "No active task to skip.", state: null };
   }
+  if (task.status !== "pending" && task.status !== "active") {
+    return { ok: false, message: `Cannot skip task with status ${task.status}.`, state: null };
+  }
 
   const nextTasks = state.tasks.map((t) =>
     t.taskId === task.taskId

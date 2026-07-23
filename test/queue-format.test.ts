@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatQueueFooterStatus, formatQueueStatusBox, formatQueueTaskStatusList } from "../src/queue-format.js";
+import {
+  formatQueueFooterStatus,
+  formatQueueStateJson,
+  formatQueueStatusBox,
+  formatQueueTaskStatusList,
+  formatTaskPreview,
+} from "../src/queue-format.js";
 import { createQueueState, createQueueTask, appendTask } from "../src/queue-state.js";
 
 test("formatQueueStatusBox shows idle empty queue", () => {
@@ -43,6 +49,16 @@ test("formatQueueStatusBox shows tasks and active goal", () => {
   assert.match(box, /\[ ACTIVE GOAL: Task 2 \]/);
 });
 
+test("queue task displays use only a trimmed first-line preview", () => {
+  const objective = `${"x".repeat(100)}\nsecond line must stay hidden`;
+  const state = appendTask(createQueueState(0), createQueueTask(objective));
+
+  assert.equal(formatTaskPreview(objective), `${"x".repeat(57)}...`);
+  assert.doesNotMatch(formatQueueStatusBox(state), /second line/);
+  assert.doesNotMatch(formatQueueTaskStatusList(state), /second line/);
+  assert.doesNotMatch(formatQueueStateJson(state), /second line/);
+});
+
 test("formatQueueStatusBox shows running state when queue is running", () => {
   const state = { ...createQueueState(0), runState: "running" as const };
   const t1 = createQueueTask("task1");
@@ -50,6 +66,7 @@ test("formatQueueStatusBox shows running state when queue is running", () => {
 
   const box = formatQueueStatusBox(withTask);
   assert.match(box, /\[ RUNNING \]/);
+  assert.doesNotMatch(box, /ACTIVE GOAL/);
 });
 
 test("formatQueueStatusBox shows paused state", () => {
@@ -58,9 +75,9 @@ test("formatQueueStatusBox shows paused state", () => {
   assert.match(box, /\[ PAUSED \]/);
 });
 
-test("formatQueueFooterStatus returns undefined for empty queue", () => {
+test("formatQueueFooterStatus shows an empty queue", () => {
   const state = createQueueState(0);
-  assert.equal(formatQueueFooterStatus(state), undefined);
+  assert.equal(formatQueueFooterStatus(state), "Queue empty");
 });
 
 test("formatQueueFooterStatus shows queue complete", () => {

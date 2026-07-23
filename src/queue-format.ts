@@ -2,8 +2,16 @@ import { formatCompactTokenValue, formatDuration } from "./format.js";
 import type { QueueRunState, QueueState, QueueTask, QueueTaskStatus } from "./queue-types.js";
 
 const BOX_WIDTH = 75;
+const TASK_PREVIEW_CHARS = 60;
 const SEPARATOR = "-".repeat(BOX_WIDTH);
 const DIVIDER = "=".repeat(BOX_WIDTH);
+
+export function formatTaskPreview(text: string, maxLength = TASK_PREVIEW_CHARS): string {
+  const firstLine = text.split(/\r?\n|\r/, 1)[0]?.trim() ?? "";
+  return firstLine.length > maxLength
+    ? `${firstLine.slice(0, Math.max(0, maxLength - 3))}...`
+    : firstLine;
+}
 
 function runStateLabel(runState: QueueRunState): string {
   switch (runState) {
@@ -62,17 +70,16 @@ function taskSummaryLine(task: QueueTask, index: number): string {
     meta = ` (${tokens})`;
   }
 
-  let line = `  ${marker} Task ${index + 1}${meta}: ${task.objective}`;
+  let line = `  ${marker} Task ${index + 1}${meta}: ${formatTaskPreview(task.objective)}`;
 
   if (task.commitSha) {
     line += ` (Commit: ${task.commitSha.slice(0, 7)})`;
   }
   if (task.commitWarning) {
-    line += ` (warning: ${task.commitWarning})`;
+    line += ` (warning: ${formatTaskPreview(task.commitWarning, 50)})`;
   }
   if (task.summary) {
-    const short = task.summary.length > 50 ? `${task.summary.slice(0, 47)}...` : task.summary;
-    line += ` // ${short}`;
+    line += ` // ${formatTaskPreview(task.summary, 50)}`;
   }
 
   return line;
@@ -119,7 +126,7 @@ export function formatQueueStatusBox(state: QueueState): string {
 
   // Active goal section
   const active = state.tasks[state.cursor];
-  if (active) {
+  if (active?.status === "active") {
     lines.push(SEPARATOR);
     lines.push(`  [ ACTIVE GOAL: Task ${state.cursor + 1} ]`);
 
@@ -145,9 +152,9 @@ export function formatQueueStatusBox(state: QueueState): string {
   return lines.join("\n");
 }
 
-export function formatQueueFooterStatus(state: QueueState): string | undefined {
+export function formatQueueFooterStatus(state: QueueState): string {
   if (state.tasks.length === 0) {
-    return undefined;
+    return "Queue empty";
   }
 
   const total = state.tasks.length;
@@ -172,12 +179,19 @@ export function formatQueueFooterStatus(state: QueueState): string | undefined {
   return parts.join(", ");
 }
 
+export function formatQueueStateJson(state: QueueState): string {
+  return JSON.stringify({
+    ...state,
+    tasks: state.tasks.map((task) => ({ ...task, objective: formatTaskPreview(task.objective) })),
+  }, null, 2);
+}
+
 export function formatQueueTaskStatusList(state: QueueState): string {
   const parts: string[] = [];
   for (let i = 0; i < state.tasks.length; i++) {
     const task = state.tasks[i];
     if (!task) continue;
-    parts.push(`${i + 1}. [${task.status}] ${task.objective}`);
+    parts.push(`${i + 1}. [${task.status}] ${formatTaskPreview(task.objective)}`);
   }
   return parts.join("\n");
 }

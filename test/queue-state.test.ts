@@ -242,6 +242,8 @@ test("skipCurrentTask handles various states", () => {
   assert.ok(skipped.ok);
   assert.equal(skipped.state?.tasks[0]?.status, "skipped");
   assert.equal(skipped.state?.tasks[0]?.completedAt, 1);
+
+  assert.equal(skipCurrentTask(skipped.state!, 2).ok, false);
 });
 
 test("recordCommit records sha and warning on active task", () => {

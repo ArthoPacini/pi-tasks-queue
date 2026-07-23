@@ -1,21 +1,22 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { formatQueueStatusBox } from "./queue-format.js";
+import { formatQueueStatusBox, formatTaskPreview } from "./queue-format.js";
 import type { QueueRuntimeController } from "./queue-runtime-controller.js";
 import {
   addTask,
   appendTask,
   clearQueue,
   removeTask,
-  resumeQueue,
   setCommitSetting,
   setRunState,
   setSummarizeSetting,
-  skipCurrentTask,
   startQueue,
 } from "./queue-state.js";
 
-type QueueCommandHost = Pick<QueueRuntimeController, "getQueueState" | "updateQueueState" | "persistQueueState" | "start">;
+type QueueCommandHost = Pick<
+  QueueRuntimeController,
+  "getQueueState" | "updateQueueState" | "persistQueueState" | "refreshUi" | "start" | "resume" | "skip"
+>;
 
 export interface QueueCommandContext {
   hasUI: boolean;
@@ -79,8 +80,7 @@ function firstArg(args: string): string {
 }
 
 function restOfArgs(args: string): string {
-  const parts = args.trim().split(/\s+/);
-  return parts.slice(1).join(" ").trim();
+  return args.trim().replace(/^\S+\s*/, "").trim();
 }
 
 function parseIndex(arg: string): number | null {
@@ -114,7 +114,8 @@ export async function handleQueueCommand(
       const task = result.task;
       host.updateQueueState((state) => appendTask(state, task));
       host.persistQueueState();
-      ctx.ui.notify(`Task added: ${rest}`);
+      host.refreshUi(ctx);
+      ctx.ui.notify(`Task added: ${formatTaskPreview(rest)}`);
       break;
     }
 
@@ -146,29 +147,28 @@ export async function handleQueueCommand(
       }
       host.updateQueueState((state) => setRunState(state, "paused"));
       host.persistQueueState();
+      host.refreshUi(ctx);
       ctx.ui.notify("Queue paused.");
       break;
     }
 
     case "resume": {
-      const result = resumeQueue(host.getQueueState());
+      const result = host.resume(ctx as Parameters<typeof host.resume>[0]);
       if (!result.ok) {
         ctx.ui.notify(result.message, "warning");
         return;
       }
-      host.updateQueueState((state) => ({ ...state, runState: "running" as const }));
       host.persistQueueState();
       ctx.ui.notify("Queue resumed.");
       break;
     }
 
     case "skip": {
-      const result = skipCurrentTask(host.getQueueState());
+      const result = host.skip(ctx as Parameters<typeof host.skip>[0]);
       if (!result.ok) {
         ctx.ui.notify(result.message, "warning");
         return;
       }
-      host.updateQueueState((state) => result.state ?? state);
       host.persistQueueState();
       ctx.ui.notify("Current task skipped.");
       break;
@@ -193,6 +193,7 @@ export async function handleQueueCommand(
         host.updateQueueState(() => result.state!);
       }
       host.persistQueueState();
+      host.refreshUi(ctx);
       ctx.ui.notify("Task removed.");
       break;
     }
@@ -213,6 +214,7 @@ export async function handleQueueCommand(
       }
       host.updateQueueState((state) => clearQueue(state));
       host.persistQueueState();
+      host.refreshUi(ctx);
       ctx.ui.notify("Queue cleared.");
       break;
     }
@@ -225,6 +227,7 @@ export async function handleQueueCommand(
       }
       host.updateQueueState((state) => setCommitSetting(state, value));
       host.persistQueueState();
+      host.refreshUi(ctx);
       ctx.ui.notify(`Auto-commit ${value ? "enabled" : "disabled"}.`);
       break;
     }
@@ -237,6 +240,7 @@ export async function handleQueueCommand(
       }
       host.updateQueueState((state) => setSummarizeSetting(state, value));
       host.persistQueueState();
+      host.refreshUi(ctx);
       ctx.ui.notify(`Auto-summarize ${value ? "enabled" : "disabled"}.`);
       break;
     }

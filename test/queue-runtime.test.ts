@@ -1,24 +1,162 @@
 import assert from "node:assert/strict";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { GoalRuntimeController } from "../src/goal-runtime-controller.js";
 import { createQueuePersistence } from "../src/queue-persistence.js";
+import { createQueueRuntimeControllerForTesting } from "../src/queue-orchestrator.js";
 import {
   addTask,
   appendTask,
   createQueueState,
   createQueueTask,
+  markTaskStarted,
   setCommitSetting,
   setRunState,
   setSummarizeSetting,
 } from "../src/queue-state.js";
 import type { QueueState } from "../src/queue-types.js";
+import { replaceGoal } from "../src/state.js";
+import type { ThreadGoal } from "../src/types.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "queue-runtime-test-"));
 }
+
+function runtimeFakes(initialGoal: ThreadGoal | null = null) {
+  const handlers = new Map<string, (event: object, ctx: ExtensionContext) => void>();
+  const statuses: Array<string | undefined> = [];
+  const sentMessages: unknown[] = [];
+  let goal = initialGoal;
+  let clearedGoals = 0;
+  let resumedGoals = 0;
+
+  const on = ((event: string, handler: (event: object, ctx: ExtensionContext) => void) => {
+    handlers.set(event, handler);
+  }) as ExtensionAPI["on"];
+  const pi = {
+    ...({} as ExtensionAPI),
+    appendEntry() {},
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+    on,
+    sendMessage(message: unknown) {
+      sentMessages.push(message);
+    },
+  };
+  const goalController = {
+    ...({} as GoalRuntimeController),
+    getGoalForDisplay: () => goal,
+    setGoal(nextGoal: ThreadGoal) {
+      goal = nextGoal;
+    },
+    clearGoal() {
+      goal = null;
+      clearedGoals++;
+    },
+    resumeGoalWithContinuation() {
+      goal = goal ? { ...goal, status: "active" } : null;
+      resumedGoals++;
+      return { ok: true, message: "Goal resumed.", goal };
+    },
+  };
+  const ctx = {
+    ...({} as ExtensionContext),
+    ui: {
+      ...({} as ExtensionContext["ui"]),
+      setStatus: (_key: string, status: string | undefined) => { statuses.push(status); },
+    },
+  };
+
+  return {
+    pi,
+    goalController,
+    ctx,
+    handlers,
+    statuses,
+    sentMessages,
+    getGoal: () => goal,
+    getClearedGoals: () => clearedGoals,
+    getResumedGoals: () => resumedGoals,
+  };
+}
+
+test("session startup restores the queue footer status", () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  const state = appendTask(persistence.load(), createQueueTask("waiting task"));
+  persistence.save(state);
+  const fakes = runtimeFakes();
+
+  createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+  fakes.handlers.get("session_start")?.({}, fakes.ctx);
+
+  assert.equal(fakes.statuses.at(-1), "Queue 0/1, 1 remaining");
+});
+
+test("session startup restores a running active task when its session goal is missing", () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("restore me"));
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "old-session").state!;
+  persistence.save(state);
+  const fakes = runtimeFakes();
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  fakes.handlers.get("session_start")?.({}, fakes.ctx);
+
+  assert.equal(controller.getQueueState().tasks[0]?.status, "active");
+  assert.equal(fakes.getGoal()?.objective, "restore me");
+  assert.equal(fakes.sentMessages.length, 1);
+  assert.equal(fakes.statuses.at(-1), "Queue 0/1, 1 remaining");
+});
+
+test("resuming a paused queue also resumes its paused goal", () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("paused task"));
+  state = markTaskStarted(state, "session").state!;
+  state = { ...state, runState: "paused" };
+  persistence.save(state);
+
+  const pausedGoal = { ...replaceGoal("paused task").goal!, status: "paused" as const };
+  const fakes = runtimeFakes(pausedGoal);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  const result = controller.resume(fakes.ctx);
+
+  assert.equal(result.ok, true);
+  assert.equal(controller.getQueueState().runState, "running");
+  assert.equal(fakes.getGoal()?.status, "active");
+  assert.equal(fakes.getResumedGoals(), 1);
+});
+
+test("skipping an active task clears its goal and starts the next task", () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createQueueTask("second task"));
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "session").state!;
+  persistence.save(state);
+
+  const firstGoal = replaceGoal("first task").goal!;
+  const fakes = runtimeFakes(firstGoal);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  const result = controller.skip(fakes.ctx);
+
+  assert.equal(result.ok, true);
+  assert.equal(controller.getQueueState().tasks[0]?.status, "skipped");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "active");
+  assert.equal(controller.getQueueState().cursor, 1);
+  assert.equal(fakes.getClearedGoals(), 1);
+  assert.equal(fakes.getGoal()?.objective, "second task");
+  assert.equal(fakes.sentMessages.length, 1);
+});
 
 test("queue persistence round-trips state through file", () => {
   const dir = tempDir();

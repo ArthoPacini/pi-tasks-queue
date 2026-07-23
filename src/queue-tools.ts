@@ -1,6 +1,7 @@
 import type { ExtensionAPI, AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { formatQueueStateJson } from "./queue-format.js";
 import type { QueueState } from "./queue-types.js";
 
 const EmptyParams = Type.Object({});
@@ -21,7 +22,7 @@ export function registerQueueTool(pi: ExtensionAPI, getQueueState: () => QueueSt
     async execute(): Promise<AgentToolResult<{ state: QueueState }>> {
       const state = getQueueState();
       return {
-        content: [{ type: "text", text: JSON.stringify(state, null, 2) }],
+        content: [{ type: "text", text: formatQueueStateJson(state) }],
         details: { state },
       };
     },

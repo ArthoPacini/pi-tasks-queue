@@ -45,7 +45,7 @@ The agent works through each task, calls `update_goal` to mark it complete. Then
 ===========================================================================
 ```
 
-Completed tasks show elapsed time and tokens. The bottom row shows the grand total across all tasks.
+Completed tasks show elapsed time and tokens. The bottom row shows the grand total across all tasks. Task rows use a trimmed first-line preview; the full objective is still kept for the agent. A compact queue status is restored in the footer when pi starts.
 
 ## Model tools
 

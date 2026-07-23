@@ -3,7 +3,15 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import test from "node:test";
 
 import { handleQueueCommand } from "../src/queue-commands.js";
-import { createQueueState, createQueueTask, appendTask, setRunState } from "../src/queue-state.js";
+import {
+  advanceCursor,
+  appendTask,
+  createQueueState,
+  createQueueTask,
+  resumeQueue,
+  setRunState,
+  skipCurrentTask,
+} from "../src/queue-state.js";
 import type { QueueState } from "../src/queue-types.js";
 
 /** Minimal context shape matching what handleQueueCommand actually uses. */
@@ -20,7 +28,10 @@ interface TestQueueHost {
   getQueueState(): QueueState;
   updateQueueState(transform: (state: QueueState) => QueueState): QueueState;
   persistQueueState(): void;
+  refreshUi(ctx: ExtensionContext): void;
   start(ctx: ExtensionContext): void;
+  resume(ctx: ExtensionContext): ReturnType<typeof resumeQueue>;
+  skip(ctx: ExtensionContext): ReturnType<typeof skipCurrentTask>;
 }
 
 function createTestHost(initial: QueueState = createQueueState()): TestQueueHost {
@@ -32,8 +43,19 @@ function createTestHost(initial: QueueState = createQueueState()): TestQueueHost
       return state;
     },
     persistQueueState: () => {},
+    refreshUi: () => {},
     start: () => {
       state = setRunState(state, "running");
+    },
+    resume: () => {
+      const result = resumeQueue(state);
+      if (result.state) state = result.state;
+      return result;
+    },
+    skip: () => {
+      const result = skipCurrentTask(state);
+      if (result.state) state = advanceCursor(result.state).state;
+      return result;
     },
   };
 }
@@ -64,6 +86,16 @@ test("/queue add appends a task", async () => {
   assert.equal(host.getQueueState().tasks.length, 1);
   assert.equal(host.getQueueState().tasks[0]?.objective, "Do something");
   assert.match(notifications.at(-1) ?? "", /Task added/);
+});
+
+test("/queue add notification previews only the trimmed first line", async () => {
+  const notifications: string[] = [];
+  const host = createTestHost();
+
+  await runCmd(host, `add ${"x".repeat(100)}\nsecond line`, notifications);
+
+  assert.equal(host.getQueueState().tasks[0]?.objective, `${"x".repeat(100)}\nsecond line`);
+  assert.equal(notifications.at(-1), `Task added: ${"x".repeat(57)}...`);
 });
 
 test("/queue add validates empty objective", async () => {
@@ -147,14 +179,18 @@ test("/queue resume resumes a paused queue", async () => {
   assert.equal(host.getQueueState().runState, "running");
 });
 
-test("/queue skip skips the current task", async () => {
+test("/queue skip skips the current task and advances", async () => {
   const notifications: string[] = [];
-  const state = appendTask(createQueueState(0), createQueueTask("task1", null, 0));
+  const state = appendTask(
+    appendTask(createQueueState(0), createQueueTask("task1", null, 0)),
+    createQueueTask("task2", null, 0),
+  );
   const host = createTestHost(state);
 
   await runCmd(host, "skip", notifications);
 
   assert.equal(host.getQueueState().tasks[0]?.status, "skipped");
+  assert.equal(host.getQueueState().cursor, 1);
 });
 
 test("/queue remove removes a pending task by 1-based index", async () => {

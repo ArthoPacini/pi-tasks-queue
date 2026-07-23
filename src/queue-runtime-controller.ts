@@ -1,7 +1,7 @@
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { createQueuePersistence, type QueuePersistence } from "./queue-persistence.js";
-import type { QueueState } from "./queue-types.js";
+import { createQueuePersistence } from "./queue-persistence.js";
+import type { QueueState, QueueStateResult } from "./queue-types.js";
 import { QUEUE_CUSTOM_ENTRY_TYPE } from "./queue-types.js";
 import {
   advanceCursor,
@@ -10,7 +10,9 @@ import {
   pauseQueue,
   recordCommit,
   recordSummary,
+  resumeQueue,
   setRunState,
+  skipCurrentTask,
 } from "./queue-state.js";
 import type { GoalRuntimeController } from "./goal-runtime-controller.js";
 import type { StatusContext } from "./goal-runtime-status.js";
@@ -34,11 +36,14 @@ export interface QueueRuntimeController {
   updateQueueState(transform: (state: QueueState) => QueueState): QueueState;
   /** Persist current state to disk. */
   persistQueueState(): void;
-  /**
-   * Set runState to "running" and immediately kick off the active task.
-   * Called by the /queue start command handler.
-   */
+  /** Refresh the queue footer status. */
+  refreshUi(ctx: StatusContext): void;
+  /** Set runState to "running" and immediately kick off the active task. */
   start(ctx: ExtensionContext): void;
+  /** Resume and immediately kick off the next pending task, if any. */
+  resume(ctx: ExtensionContext): QueueStateResult;
+  /** Skip the current task and advance the queue. */
+  skip(ctx: ExtensionContext): QueueStateResult;
 }
 
 export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): QueueRuntimeController {
@@ -74,10 +79,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
   const refreshUi = (ctx: StatusContext): void => {
     try {
-      const footer = formatQueueFooterStatus(queueState);
-      if (footer) {
-        ctx.ui.setStatus("pi-queue", footer);
-      }
+      ctx.ui.setStatus("pi-queue", formatQueueFooterStatus(queueState));
     } catch {
       // Ignore UI errors
     }
@@ -109,6 +111,46 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   const start = (ctx: ExtensionContext): void => {
     queueState = setRunState(queueState, "running");
     startKickoff(ctx);
+    refreshUi(ctx);
+  };
+
+  const resume = (ctx: ExtensionContext): QueueStateResult => {
+    const result = resumeQueue(queueState);
+    if (!result.ok || !result.state) {
+      return result;
+    }
+
+    const goal = deps.goalController.getGoalForDisplay();
+    if (goal?.status === "paused") {
+      const resumedGoal = deps.goalController.resumeGoalWithContinuation(goal.goalId, "runtime", ctx);
+      if (!resumedGoal.ok) {
+        return { ok: false, message: resumedGoal.message, state: null };
+      }
+    }
+
+    queueState = result.state;
+    startKickoff(ctx);
+    refreshUi(ctx);
+    return { ...result, state: queueState };
+  };
+
+  const skip = (ctx: ExtensionContext): QueueStateResult => {
+    const skippedTaskWasActive = queueState.tasks[queueState.cursor]?.status === "active";
+    const result = skipCurrentTask(queueState);
+    if (!result.ok || !result.state) {
+      return result;
+    }
+    queueState = result.state;
+
+    if (skippedTaskWasActive) {
+      deps.goalController.clearGoal("runtime", ctx);
+    }
+
+    queueState = advanceCursor(queueState).state;
+    persistQueueState();
+    startKickoff(ctx);
+    refreshUi(ctx);
+    return { ...result, state: queueState };
   };
 
   /** Kick off the active task when runState is running. */
@@ -119,6 +161,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     const goal = deps.goalController.getGoalForDisplay();
 
     const activeTask = queueState.tasks[queueState.cursor];
+    const restoringActiveTask = activeTask?.status === "active" && !goal;
     if (goal && goal.status !== "complete") {
       if (activeTask && goal.objective.startsWith(activeTask.objective)) {
         return;
@@ -139,15 +182,17 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     }
 
     const task = queueState.tasks[queueState.cursor];
-    if (!task || task.status !== "pending") {
+    if (!task || (task.status !== "pending" && !restoringActiveTask)) {
       return;
     }
 
-    const started = markTaskStarted(queueState, "unknown");
-    if (!started.ok || !started.state) {
-      return;
+    if (!restoringActiveTask) {
+      const started = markTaskStarted(queueState, "unknown");
+      if (!started.ok || !started.state) {
+        return;
+      }
+      queueState = started.state;
     }
-    queueState = started.state;
 
     // Build startup content
     let startupContent: string;
@@ -170,7 +215,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
     deps.goalController.setGoal(result.goal, "runtime", ctx);
 
-    appendAuditEntry("task_started", {
+    appendAuditEntry(restoringActiveTask ? "task_restored" : "task_started", {
       taskId: task.taskId,
       objective: task.objective,
       cursor: queueState.cursor,
@@ -274,6 +319,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   // Register event handlers — these get plain ExtensionContext, not ExtensionCommandContext
   deps.pi.on("session_start", (_event: object, ctx: ExtensionContext) => {
     startKickoff(ctx);
+    refreshUi(ctx);
   });
 
   deps.pi.on("session_tree", (_event: object, ctx: ExtensionContext) => {
@@ -288,6 +334,9 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     getQueueState: () => queueState,
     updateQueueState,
     persistQueueState,
+    refreshUi,
     start,
+    resume,
+    skip,
   };
 }
