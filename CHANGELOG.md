@@ -7,6 +7,7 @@
 - Add `/queue edit <index>` for editor-based or inline replacement of pending entries.
 - Add `/queue status toggle|on|off` for a persistent live task widget, and show commit/summarize/live settings in queue status.
 - Make commit-between-tasks await the complete git workflow in the queue project root, surface `git status` failures, record commit results before advancing, and expose commit mode in status displays.
+- Start task 1 in a new pi session and replace the session between completed queue tasks, so every agent task gets an empty conversation context; when summarize mode is enabled, carry only the captured transition summary into the fresh session.
 
 ## 0.1.35 - 2026-07-11
 

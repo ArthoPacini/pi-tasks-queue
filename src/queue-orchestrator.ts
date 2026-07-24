@@ -26,6 +26,7 @@ export function registerQueueOrchestrator(pi: ExtensionAPI, goalController: Goal
     start: controller.start,
     resume: controller.resume,
     skip: controller.skip,
+    startNextTaskInFreshSession: controller.startNextTaskInFreshSession,
   });
 }
 

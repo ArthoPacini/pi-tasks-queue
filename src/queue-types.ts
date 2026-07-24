@@ -1,5 +1,8 @@
 export const QUEUE_CUSTOM_ENTRY_TYPE = "pi-queue";
 
+/** Private /queue subcommand used to obtain a command context for session replacement. */
+export const QUEUE_NEW_SESSION_SUBCOMMAND = "__start-next-session";
+
 export const MAX_OBJECTIVE_CHARS = 8000;
 
 export type QueueTaskStatus = "pending" | "active" | "complete" | "failed" | "skipped";

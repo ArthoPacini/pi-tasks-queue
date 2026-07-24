@@ -1,8 +1,12 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import { createQueuePersistence } from "./queue-persistence.js";
 import type { QueueState, QueueStateResult } from "./queue-types.js";
-import { QUEUE_CUSTOM_ENTRY_TYPE } from "./queue-types.js";
+import { QUEUE_CUSTOM_ENTRY_TYPE, QUEUE_NEW_SESSION_SUBCOMMAND } from "./queue-types.js";
 import {
   advanceCursor,
   markTaskComplete,
@@ -42,12 +46,14 @@ export interface QueueRuntimeController {
   persistQueueState(): void;
   /** Refresh the queue footer and optional live widget. */
   refreshUi(ctx: QueueUiContext): void;
-  /** Set runState to "running" and immediately kick off the active task. */
-  start(ctx: ExtensionContext): void;
+  /** Set runState to "running" and start the first entry in a fresh session. */
+  start(ctx: ExtensionCommandContext): Promise<void>;
   /** Resume and immediately kick off the next pending task, if any. */
   resume(ctx: ExtensionContext): QueueStateResult;
   /** Skip the current task and advance the queue. */
   skip(ctx: ExtensionContext): QueueStateResult;
+  /** Replace the current session before starting the expected pending queue entry. */
+  startNextTaskInFreshSession(expectedTaskId: string, ctx: ExtensionCommandContext): Promise<QueueStateResult>;
 }
 
 export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): QueueRuntimeController {
@@ -95,6 +101,11 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
   loadState();
 
+  /** Ask the registered /queue command to perform a safe session replacement once Pi is idle. */
+  const requestFreshSession = (taskId: string): void => {
+    deps.pi.sendUserMessage(`/queue ${QUEUE_NEW_SESSION_SUBCOMMAND} ${taskId}`, { deliverAs: "followUp" });
+  };
+
   /** Queue a continuation turn for the active goal. */
   const queueGoalTurn = (ctx: ExtensionContext): void => {
     const goal = deps.goalController.getGoalForDisplay();
@@ -113,13 +124,15 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     );
   };
 
-  /**
-   * Set runState to "running" and kick off the active task immediately.
-   */
-  const start = (ctx: ExtensionContext): void => {
+  /** Set runState to "running" and replace the setup session before task 1. */
+  const start = async (ctx: ExtensionCommandContext): Promise<void> => {
     queueState = setRunState(queueState, "running");
-    startKickoff(ctx);
+    persistQueueState();
     refreshUi(ctx);
+    const firstEntry = queueState.tasks[queueState.cursor];
+    if (firstEntry?.status === "pending") {
+      await startNextTaskInFreshSession(firstEntry.taskId, ctx);
+    }
   };
 
   const resume = (ctx: ExtensionContext): QueueStateResult => {
@@ -148,7 +161,15 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       }
     }
 
-    startKickoff(ctx);
+    const nextEntry = queueState.tasks[queueState.cursor];
+    const currentGoal = deps.goalController.getGoalForDisplay();
+    if (nextEntry?.status === "pending" && (!currentGoal || currentGoal.status === "complete")) {
+      // Entering a pending task always crosses a session boundary. This covers
+      // cancelled replacements and tasks that follow a human pause.
+      requestFreshSession(nextEntry.taskId);
+    } else {
+      startKickoff(ctx);
+    }
     persistQueueState();
     refreshUi(ctx);
     return { ...result, state: queueState };
@@ -173,8 +194,11 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
     queueState = advanceCursor(queueState).state;
     persistQueueState();
-    startKickoff(ctx);
     refreshUi(ctx);
+    const nextEntry = queueState.tasks[queueState.cursor];
+    if (nextEntry?.status === "pending") {
+      requestFreshSession(nextEntry.taskId);
+    }
     return { ...result, state: queueState };
   };
 
@@ -213,7 +237,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
     if (task.kind === "pause") {
       if (!restoringActiveTask) {
-        const started = markTaskStarted(queueState, "human-pause");
+        const started = markTaskStarted(queueState, ctx.sessionManager.getSessionId());
         if (!started.ok || !started.state) {
           return;
         }
@@ -232,19 +256,23 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     }
 
     if (!restoringActiveTask) {
-      const started = markTaskStarted(queueState, "unknown");
+      const started = markTaskStarted(queueState, ctx.sessionManager.getSessionId());
       if (!started.ok || !started.state) {
         return;
       }
       queueState = started.state;
     }
 
-    // Build startup content
+    // Build startup content. Human pauses do not break the summary chain: use
+    // the latest preceding agent task whose transition summary was captured.
     let startupContent: string;
     if (queueState.settings.summarizeBetweenTasks) {
-      const prevTask = queueState.cursor > 0 ? queueState.tasks[queueState.cursor - 1] : null;
-      if (prevTask?.summary) {
-        startupContent = `${formatPriorContext(prevTask.taskId, prevTask.summary)}\n\n${task.objective}`;
+      const priorTask = queueState.tasks
+        .slice(0, queueState.cursor)
+        .reverse()
+        .find((candidate) => candidate.kind === "task" && candidate.summary);
+      if (priorTask?.summary) {
+        startupContent = `${formatPriorContext(priorTask.taskId, priorTask.summary)}\n\n${task.objective}`;
       } else {
         startupContent = task.objective;
       }
@@ -344,9 +372,60 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       return;
     }
 
-    // Kick off the next task immediately
+    // Session-control methods are intentionally unavailable in event handlers.
+    // Route through a private extension command, which waits until Pi is idle
+    // and replaces the session before the next queue entry starts.
+    const nextTask = queueState.tasks[queueState.cursor];
     persistQueueState();
-    startKickoff(ctx);
+    refreshUi(ctx);
+    if (nextTask) {
+      appendAuditEntry("session_transition_requested", { taskId: nextTask.taskId, cursor: queueState.cursor });
+      requestFreshSession(nextTask.taskId);
+    }
+  };
+
+  const startNextTaskInFreshSession = async (
+    expectedTaskId: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<QueueStateResult> => {
+    await ctx.waitForIdle();
+
+    const nextTask = queueState.tasks[queueState.cursor];
+    if (
+      queueState.runState !== "running" ||
+      !nextTask ||
+      nextTask.taskId !== expectedTaskId ||
+      nextTask.status !== "pending"
+    ) {
+      return { ok: false, message: "Stale queue session transition ignored.", state: null };
+    }
+
+    const parentSession = ctx.sessionManager.getSessionFile();
+    const success: QueueStateResult = {
+      ok: true,
+      message: "Started the next queue entry in a fresh session.",
+      state: queueState,
+    };
+    const replacement = await ctx.newSession(parentSession ? { parentSession } : undefined);
+    if (!replacement.cancelled) {
+      // The old extension instance and ctx are stale after replacement. The new
+      // instance loads queue.json and starts the pending entry from session_start.
+      return success;
+    }
+
+    queueState = setRunState(queueState, "paused");
+    appendAuditEntry("session_transition_cancelled", { taskId: expectedTaskId, cursor: queueState.cursor });
+    persistQueueState();
+    refreshUi(ctx);
+    try {
+      ctx.ui.notify(
+        "Fresh-session creation was cancelled. The queue is paused; run /queue resume to retry.",
+        "warning",
+      );
+    } catch {
+      // Ignore UI errors
+    }
+    return { ok: false, message: "Fresh-session creation was cancelled.", state: queueState };
   };
 
   const handleTaskPaused = (ctx: ExtensionContext, reason: string): void => {
@@ -383,5 +462,6 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     start,
     resume,
     skip,
+    startNextTaskInFreshSession,
   };
 }

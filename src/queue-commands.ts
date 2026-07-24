@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 import { formatQueueStatusBox, formatTaskPreview } from "./queue-format.js";
 import type { QueueRuntimeController } from "./queue-runtime-controller.js";
+import { QUEUE_NEW_SESSION_SUBCOMMAND } from "./queue-types.js";
 import {
   addTask,
   appendTask,
@@ -213,11 +214,11 @@ export async function handleQueueCommand(
         ctx.ui.notify(result.message, "warning");
         return;
       }
-      // Pass the full command context to start (it has ExtensionContext's required properties)
-      host.start(ctx as Parameters<typeof host.start>[0]);
-      host.persistQueueState();
+      // Notify before session replacement; the command ctx becomes stale once
+      // the fresh task session has been installed.
       ctx.ui.notify("Queue started.");
-      break;
+      await host.start(ctx as Parameters<typeof host.start>[0]);
+      return;
     }
 
     case "pause": {
@@ -337,13 +338,23 @@ export async function handleQueueCommand(
   }
 }
 
-export function registerQueueCommand(pi: ExtensionAPI, host: QueueCommandHost): void {
+export function registerQueueCommand(
+  pi: ExtensionAPI,
+  host: QueueCommandHost & Pick<QueueRuntimeController, "startNextTaskInFreshSession">,
+): void {
   pi.registerCommand("queue", {
     description: "Manage the multi-task queue.",
     getArgumentCompletions(argumentPrefix) {
       return completions(argumentPrefix.trim());
     },
     async handler(args: string, ctx: ExtensionCommandContext) {
+      if (firstArg(args) === QUEUE_NEW_SESSION_SUBCOMMAND) {
+        const expectedTaskId = restOfArgs(args);
+        if (expectedTaskId) {
+          await host.startNextTaskInFreshSession(expectedTaskId, ctx);
+        }
+        return;
+      }
       await handleQueueCommand(host, args, ctx as Parameters<typeof handleQueueCommand>[2]);
     },
   });

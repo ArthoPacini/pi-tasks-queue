@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +41,7 @@ function runtimeFakes(
   const widgets: Array<string[] | undefined> = [];
   const notifications: string[] = [];
   const sentMessages: unknown[] = [];
+  const sentUserMessages: Array<{ content: unknown; options: unknown }> = [];
   let goal = initialGoal;
   let clearedGoals = 0;
   let resumedGoals = 0;
@@ -51,6 +56,9 @@ function runtimeFakes(
     on,
     sendMessage(message: unknown) {
       sentMessages.push(message);
+    },
+    sendUserMessage(content: unknown, options: unknown) {
+      sentUserMessages.push({ content, options });
     },
   };
   const goalController = {
@@ -74,6 +82,10 @@ function runtimeFakes(
   };
   const ctx = {
     ...({} as ExtensionContext),
+    sessionManager: {
+      getSessionId: () => "test-session-id",
+      getSessionFile: () => "/tmp/current-session.jsonl",
+    } as ExtensionContext["sessionManager"],
     ui: {
       ...({} as ExtensionContext["ui"]),
       setStatus: (_key: string, status: string | undefined) => { statuses.push(status); },
@@ -91,6 +103,7 @@ function runtimeFakes(
     widgets,
     notifications,
     sentMessages,
+    sentUserMessages,
     getGoal: () => goal,
     getClearedGoals: () => clearedGoals,
     getResumedGoals: () => resumedGoals,
@@ -142,6 +155,40 @@ test("session startup restores a running active task when its session goal is mi
   assert.equal(fakes.statuses.at(-1), "Queue 0/1, 1 remaining");
 });
 
+test("starting a queue replaces the setup session before task 1", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  persistence.save(appendTask(persistence.load(), createQueueTask("fresh first task")));
+  const fakes = runtimeFakes();
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+  let newSessionCalls = 0;
+  const commandCtx = {
+    ...fakes.ctx,
+    waitForIdle: async () => {},
+    newSession: async () => {
+      newSessionCalls++;
+      return { cancelled: false };
+    },
+  } as ExtensionCommandContext;
+
+  await controller.start(commandCtx);
+
+  assert.equal(newSessionCalls, 1);
+  assert.equal(controller.getQueueState().runState, "running");
+  assert.equal(controller.getQueueState().tasks[0]?.status, "pending");
+  assert.equal(fakes.getGoal(), null, "task 1 must not start in the setup session");
+
+  const replacementFakes = runtimeFakes();
+  const replacementController = createQueueRuntimeControllerForTesting(
+    replacementFakes.pi,
+    replacementFakes.goalController,
+    dir,
+  );
+  replacementFakes.handlers.get("session_start")?.({}, replacementFakes.ctx);
+  assert.equal(replacementController.getQueueState().tasks[0]?.status, "active");
+  assert.equal(replacementFakes.getGoal()?.objective, "fresh first task");
+});
+
 test("resuming a paused queue also resumes its paused goal", () => {
   const dir = tempDir();
   const persistence = createQueuePersistence({ projectRoot: dir });
@@ -162,7 +209,7 @@ test("resuming a paused queue also resumes its paused goal", () => {
   assert.equal(fakes.getResumedGoals(), 1);
 });
 
-test("skipping an active task clears its goal and starts the next task", () => {
+test("skipping an active task clears its goal and replaces the session before the next task", () => {
   const dir = tempDir();
   const persistence = createQueuePersistence({ projectRoot: dir });
   let state = appendTask(persistence.load(), createQueueTask("first task"));
@@ -179,11 +226,22 @@ test("skipping an active task clears its goal and starts the next task", () => {
 
   assert.equal(result.ok, true);
   assert.equal(controller.getQueueState().tasks[0]?.status, "skipped");
-  assert.equal(controller.getQueueState().tasks[1]?.status, "active");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
   assert.equal(controller.getQueueState().cursor, 1);
   assert.equal(fakes.getClearedGoals(), 1);
-  assert.equal(fakes.getGoal()?.objective, "second task");
-  assert.equal(fakes.sentMessages.length, 1);
+  assert.equal(fakes.getGoal(), null);
+  assert.equal(fakes.sentMessages.length, 0);
+  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
+
+  const replacementFakes = runtimeFakes();
+  const replacementController = createQueueRuntimeControllerForTesting(
+    replacementFakes.pi,
+    replacementFakes.goalController,
+    dir,
+  );
+  replacementFakes.handlers.get("session_start")?.({}, replacementFakes.ctx);
+  assert.equal(replacementController.getQueueState().tasks[1]?.status, "active");
+  assert.equal(replacementFakes.getGoal()?.objective, "second task");
 });
 
 test("a queued human pause blocks advancement until resume", async () => {
@@ -203,18 +261,165 @@ test("a queued human pause blocks advancement until resume", async () => {
   await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
 
   assert.equal(controller.getQueueState().tasks[0]?.status, "complete");
-  assert.equal(controller.getQueueState().tasks[1]?.status, "active");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
   assert.equal(controller.getQueueState().tasks[1]?.kind, "pause");
   assert.equal(controller.getQueueState().tasks[2]?.status, "pending");
-  assert.equal(controller.getQueueState().runState, "paused");
-  assert.match(fakes.notifications.at(-1) ?? "", /human pause/);
+  assert.equal(controller.getQueueState().runState, "running");
+  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
 
+  // Session replacement reloads the extension; session_start in the fresh
+  // instance reaches the pause without carrying the completed task's context.
+  const replacementFakes = runtimeFakes();
+  const replacementController = createQueueRuntimeControllerForTesting(
+    replacementFakes.pi,
+    replacementFakes.goalController,
+    dir,
+  );
+  replacementFakes.handlers.get("session_start")?.({}, replacementFakes.ctx);
+
+  assert.equal(replacementController.getQueueState().tasks[1]?.status, "active");
+  assert.equal(replacementController.getQueueState().runState, "paused");
+  assert.match(replacementFakes.notifications.at(-1) ?? "", /human pause/);
+
+  const resumed = replacementController.resume(replacementFakes.ctx);
+  assert.equal(resumed.ok, true);
+  assert.equal(replacementController.getQueueState().tasks[1]?.status, "complete");
+  assert.equal(replacementController.getQueueState().tasks[2]?.status, "pending");
+  assert.equal(replacementController.getQueueState().runState, "running");
+  assert.match(String(replacementFakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
+
+  const afterPauseFakes = runtimeFakes();
+  const afterPauseController = createQueueRuntimeControllerForTesting(
+    afterPauseFakes.pi,
+    afterPauseFakes.goalController,
+    dir,
+  );
+  afterPauseFakes.handlers.get("session_start")?.({}, afterPauseFakes.ctx);
+  assert.equal(afterPauseController.getQueueState().tasks[2]?.status, "active");
+  assert.equal(afterPauseFakes.getGoal()?.objective, "after approval");
+});
+
+test("completed tasks replace the session before the next task starts", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createQueueTask("second task"));
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "old-session").state!;
+  persistence.save(state);
+
+  const completedGoal = { ...replaceGoal("first task").goal!, status: "complete" as const };
+  const fakes = runtimeFakes(completedGoal);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
+
+  const pendingTask = controller.getQueueState().tasks[1]!;
+  assert.equal(pendingTask.status, "pending");
+  assert.equal(fakes.getGoal()?.objective, "first task");
+  assert.equal(fakes.sentMessages.length, 0, "next task must not start in the old session");
+  assert.deepEqual(fakes.sentUserMessages.at(-1)?.options, { deliverAs: "followUp" });
+  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), new RegExp(pendingTask.taskId));
+
+  let waitedForIdle = 0;
+  let newSessionParent: string | undefined;
+  const commandCtx = {
+    ...fakes.ctx,
+    waitForIdle: async () => { waitedForIdle++; },
+    newSession: async (options?: { parentSession?: string }) => {
+      newSessionParent = options?.parentSession;
+      return { cancelled: false };
+    },
+  } as ExtensionCommandContext;
+  const transition = await controller.startNextTaskInFreshSession(pendingTask.taskId, commandCtx);
+
+  assert.equal(transition.ok, true);
+  assert.equal(waitedForIdle, 1);
+  assert.equal(newSessionParent, "/tmp/current-session.jsonl");
+
+  const replacementFakes = runtimeFakes();
+  const replacementController = createQueueRuntimeControllerForTesting(
+    replacementFakes.pi,
+    replacementFakes.goalController,
+    dir,
+  );
+  replacementFakes.handlers.get("session_start")?.({}, replacementFakes.ctx);
+
+  assert.equal(replacementController.getQueueState().tasks[1]?.status, "active");
+  assert.equal(replacementController.getQueueState().tasks[1]?.sessionId, "test-session-id");
+  assert.equal(replacementFakes.getGoal()?.objective, "second task");
+  assert.equal(replacementFakes.sentMessages.length, 1);
+});
+
+test("cancelled session replacement pauses instead of reusing the old context", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createQueueTask("second task"));
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "old-session").state!;
+  persistence.save(state);
+
+  const completedGoal = { ...replaceGoal("first task").goal!, status: "complete" as const };
+  const fakes = runtimeFakes(completedGoal);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+  await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
+  const nextTask = controller.getQueueState().tasks[1]!;
+  const commandCtx = {
+    ...fakes.ctx,
+    waitForIdle: async () => {},
+    newSession: async () => ({ cancelled: true }),
+  } as ExtensionCommandContext;
+
+  const transition = await controller.startNextTaskInFreshSession(nextTask.taskId, commandCtx);
+
+  assert.equal(transition.ok, false);
+  assert.equal(controller.getQueueState().runState, "paused");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
+  assert.equal(fakes.getGoal()?.objective, "first task");
+  assert.match(fakes.notifications.at(-1) ?? "", /queue is paused/);
+
+  const queuedBeforeResume = fakes.sentUserMessages.length;
   const resumed = controller.resume(fakes.ctx);
   assert.equal(resumed.ok, true);
-  assert.equal(controller.getQueueState().tasks[1]?.status, "complete");
-  assert.equal(controller.getQueueState().tasks[2]?.status, "active");
-  assert.equal(controller.getQueueState().runState, "running");
-  assert.equal(fakes.getGoal()?.objective, "after approval");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
+  assert.equal(fakes.sentMessages.length, 0);
+  assert.equal(fakes.sentUserMessages.length, queuedBeforeResume + 1);
+});
+
+test("summarize mode carries only the captured summary into the fresh task session", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createQueueTask("second task"));
+  state = setSummarizeSetting(state, true);
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "old-session").state!;
+  persistence.save(state);
+
+  const completedGoal = { ...replaceGoal("first task").goal!, status: "complete" as const };
+  const fakes = runtimeFakes(completedGoal);
+  fakes.ctx.compact = (options) => {
+    options?.onComplete?.({
+      summary: "Touched src/first.ts; no remaining issues.",
+      firstKeptEntryId: "kept-entry",
+      tokensBefore: 100,
+    });
+  };
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
+  assert.equal(controller.getQueueState().tasks[0]?.summary, "Touched src/first.ts; no remaining issues.");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
+
+  const replacementFakes = runtimeFakes();
+  createQueueRuntimeControllerForTesting(replacementFakes.pi, replacementFakes.goalController, dir);
+  replacementFakes.handlers.get("session_start")?.({}, replacementFakes.ctx);
+
+  const objective = replacementFakes.getGoal()?.objective ?? "";
+  assert.match(objective, /^<pi_queue_prior_context/);
+  assert.match(objective, /Touched src\/first\.ts; no remaining issues\./);
+  assert.match(objective, /second task$/);
 });
 
 test("agent_end awaits commit-between-tasks and records the commit", async () => {

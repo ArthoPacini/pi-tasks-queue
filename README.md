@@ -15,7 +15,7 @@ Built on top of the pi-codex-goal https://github.com/fitchmultz/pi-codex-goal by
 /queue start
 ```
 
-The agent works through each task, calls `update_goal` to mark it complete. Then the queue kicks off the next task.
+The agent works through each task and calls `update_goal` to mark it complete. Before the next queue entry starts, pi creates a new session, so the completed task's conversation and tool output are not retained in the next task's model context.
 
 ## Commands
 
@@ -85,7 +85,7 @@ The commit message comes from the task objective, never from the LLM. If any git
 
 ## Toggle: summarize between tasks
 
-Default off. When on, after each task completes the queue runs `ctx.compact()` to capture key decisions, touched files, and remaining issues. That summary is injected into the next task's startup prompt as `<pi_queue_prior_context>`. If off, each task starts fresh with no prior context.
+Default off. When on, after each task completes the queue runs `ctx.compact()` to capture key decisions, touched files, and remaining issues. The queue then creates a fresh session and injects only that summary into the next agent task's startup prompt as `<pi_queue_prior_context>`. If off, the new session receives no conversation context from the completed task. Human pauses do not break the summary chain.
 
 ## Task states
 
