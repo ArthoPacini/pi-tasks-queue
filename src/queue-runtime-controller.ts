@@ -79,6 +79,17 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   };
 
   const persistQueueState = (): void => {
+    // Retry on write conflict: reload, bump off the disk revision, and write.
+    // A dropped save here would leave the disk stale, and the fresh-session
+    // chain loads from disk, so a missed write can stall the queue permanently.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      if (persistence.save(queueState)) return;
+      // Conflict: disk was written by another instance. Reload, update our
+      // revision to beat the disk, and retry.
+      const disk = persistence.load();
+      queueState = { ...queueState, revision: disk.revision + 1 };
+    }
+    // Final attempt — write even on conflict so the queue doesn't stall.
     persistence.save(queueState);
   };
 
@@ -131,6 +142,33 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   };
 
   const resume = async (ctx: ExtensionCommandContext): Promise<QueueStateResult> => {
+    // When the fresh-session chain dies silently (cancelled session,
+    // stale extension, etc.) the queue can stall with runState=running,
+    // cursor pointing at a completed/skipped task, and a pending task
+    // waiting.  Detect this and treat it like a resume.
+    if (queueState.runState === "running") {
+      const currentTask = queueState.tasks[queueState.cursor];
+      if (currentTask && currentTask.status !== "active" && currentTask.status !== "pending") {
+        const { state, advanced } = advanceCursor(queueState);
+        if (advanced) {
+          queueState = state;
+        }
+      }
+      const nextTask = queueState.tasks[queueState.cursor];
+      if (nextTask?.status === "pending" && nextTask.kind === "task") {
+        const goal = deps.goalController.getGoalForDisplay();
+        if (!goal || goal.status === "complete") {
+          persistQueueState();
+          refreshUi(ctx);
+          return startNextTaskInFreshSession(nextTask.taskId, ctx);
+        }
+        persistQueueState();
+        refreshUi(ctx);
+        startKickoff(ctx);
+        return { ok: true, message: "Resumed stuck queue.", state: queueState };
+      }
+    }
+
     const result = resumeQueue(queueState);
     if (!result.ok || !result.state) {
       return result;
@@ -368,7 +406,10 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     }
 
     // A command-owned fresh-session chain performs the next replacement after
-    // this run settles. Event handlers cannot call session-control methods.
+    // this run settles.  Event handlers cannot call session-control methods.
+    // When the chain dies silently (cancelled newSession, stale extension
+    // instances, etc.) the queue may stall with runState=running and a pending
+    // next task.  /queue resume detects this and restarts it deterministically.
     persistQueueState();
     refreshUi(ctx);
   };
