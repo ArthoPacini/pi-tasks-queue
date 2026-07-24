@@ -17,11 +17,15 @@ import {
 import type { GoalRuntimeController } from "./goal-runtime-controller.js";
 import type { StatusContext } from "./goal-runtime-status.js";
 import { type GitCommitResult, commitTaskWork, type ExecFunction } from "./queue-git.js";
-import { formatQueueFooterStatus } from "./queue-format.js";
+import { formatQueueFooterStatus, formatQueueWidgetLines } from "./queue-format.js";
 import { captureSummary, formatPriorContext } from "./queue-summarize.js";
 import { replaceGoal } from "./state.js";
 import { continuationPrompt } from "./prompts.js";
 import { CUSTOM_ENTRY_TYPE } from "./types.js";
+
+interface QueueUiContext extends StatusContext {
+  ui: StatusContext["ui"] & Pick<ExtensionContext["ui"], "setWidget">;
+}
 
 interface QueueRuntimeControllerDeps {
   pi: ExtensionAPI;
@@ -32,12 +36,12 @@ interface QueueRuntimeControllerDeps {
 export interface QueueRuntimeController {
   /** Read-only snapshot of current queue state. */
   getQueueState(): QueueState;
-  /** Apply a pure-state transformation to the in-memory queue state and persist. */
+  /** Apply a pure-state transformation to the in-memory queue state. */
   updateQueueState(transform: (state: QueueState) => QueueState): QueueState;
   /** Persist current state to disk. */
   persistQueueState(): void;
-  /** Refresh the queue footer status. */
-  refreshUi(ctx: StatusContext): void;
+  /** Refresh the queue footer and optional live widget. */
+  refreshUi(ctx: QueueUiContext): void;
   /** Set runState to "running" and immediately kick off the active task. */
   start(ctx: ExtensionContext): void;
   /** Resume and immediately kick off the next pending task, if any. */
@@ -51,7 +55,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   let queueState: QueueState;
 
   const exec: ExecFunction = async (command: string, args?: string[]) => {
-    const result = await deps.pi.exec(command, args ?? []);
+    const result = await deps.pi.exec(command, args ?? [], { cwd: deps.projectRoot });
     return {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
@@ -77,9 +81,13 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     return queueState;
   };
 
-  const refreshUi = (ctx: StatusContext): void => {
+  const refreshUi = (ctx: QueueUiContext): void => {
     try {
       ctx.ui.setStatus("pi-queue", formatQueueFooterStatus(queueState));
+      ctx.ui.setWidget(
+        "pi-queue-status",
+        queueState.settings.showStatusWidget ? formatQueueWidgetLines(queueState) : undefined,
+      );
     } catch {
       // Ignore UI errors
     }
@@ -120,30 +128,47 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       return result;
     }
 
-    const goal = deps.goalController.getGoalForDisplay();
-    if (goal?.status === "paused") {
-      const resumedGoal = deps.goalController.resumeGoalWithContinuation(goal.goalId, "runtime", ctx);
-      if (!resumedGoal.ok) {
-        return { ok: false, message: resumedGoal.message, state: null };
+    queueState = result.state;
+    const waitingPause = queueState.tasks[queueState.cursor];
+    if (waitingPause?.kind === "pause" && waitingPause.status === "active") {
+      const completed = markTaskComplete(queueState);
+      if (!completed.ok || !completed.state) {
+        return completed;
+      }
+      queueState = completed.state;
+      appendAuditEntry("human_pause_resumed", { taskId: waitingPause.taskId, cursor: queueState.cursor });
+      queueState = advanceCursor(queueState).state;
+    } else {
+      const goal = deps.goalController.getGoalForDisplay();
+      if (goal?.status === "paused") {
+        const resumedGoal = deps.goalController.resumeGoalWithContinuation(goal.goalId, "runtime", ctx);
+        if (!resumedGoal.ok) {
+          return { ok: false, message: resumedGoal.message, state: null };
+        }
       }
     }
 
-    queueState = result.state;
     startKickoff(ctx);
+    persistQueueState();
     refreshUi(ctx);
     return { ...result, state: queueState };
   };
 
   const skip = (ctx: ExtensionContext): QueueStateResult => {
-    const skippedTaskWasActive = queueState.tasks[queueState.cursor]?.status === "active";
+    const skippedTask = queueState.tasks[queueState.cursor];
+    const skippedAgentTaskWasActive = skippedTask?.status === "active" && skippedTask.kind === "task";
+    const skippedHumanPause = skippedTask?.status === "active" && skippedTask.kind === "pause";
     const result = skipCurrentTask(queueState);
     if (!result.ok || !result.state) {
       return result;
     }
     queueState = result.state;
 
-    if (skippedTaskWasActive) {
+    if (skippedAgentTaskWasActive) {
       deps.goalController.clearGoal("runtime", ctx);
+    }
+    if (skippedHumanPause) {
+      queueState = setRunState(queueState, "running");
     }
 
     queueState = advanceCursor(queueState).state;
@@ -183,6 +208,26 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
     const task = queueState.tasks[queueState.cursor];
     if (!task || (task.status !== "pending" && !restoringActiveTask)) {
+      return;
+    }
+
+    if (task.kind === "pause") {
+      if (!restoringActiveTask) {
+        const started = markTaskStarted(queueState, "human-pause");
+        if (!started.ok || !started.state) {
+          return;
+        }
+        queueState = started.state;
+      }
+      queueState = setRunState(queueState, "paused");
+      appendAuditEntry("human_pause_reached", { taskId: task.taskId, cursor: queueState.cursor });
+      persistQueueState();
+      refreshUi(ctx);
+      try {
+        ctx.ui.notify("Queue reached a human pause. Run /queue resume when ready.", "info");
+      } catch {
+        // Ignore UI errors
+      }
       return;
     }
 
@@ -227,14 +272,14 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   };
 
   /** Detect goal transitions after an agent run. */
-  const checkGoalTransition = (ctx: ExtensionContext): void => {
+  const checkGoalTransition = async (ctx: ExtensionContext): Promise<void> => {
     const goal = deps.goalController.getGoalForDisplay();
     if (!goal) {
       return;
     }
 
     if (goal.status === "complete") {
-      handleTaskComplete(ctx);
+      await handleTaskComplete(ctx);
     } else if (goal.status === "paused" || goal.status === "budgetLimited") {
       handleTaskPaused(ctx, goal.status);
     }
@@ -326,8 +371,8 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     startKickoff(ctx);
   });
 
-  deps.pi.on("agent_end", (_event: object, ctx: ExtensionContext) => {
-    checkGoalTransition(ctx);
+  deps.pi.on("agent_end", async (_event: object, ctx: ExtensionContext) => {
+    await checkGoalTransition(ctx);
   });
 
   return {

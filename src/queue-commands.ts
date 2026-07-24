@@ -6,9 +6,13 @@ import {
   addTask,
   appendTask,
   clearQueue,
+  createPauseTask,
+  editTask,
   removeTask,
+  replaceWithPause,
   setCommitSetting,
   setRunState,
+  setStatusWidgetSetting,
   setSummarizeSetting,
   startQueue,
 } from "./queue-state.js";
@@ -20,13 +24,14 @@ type QueueCommandHost = Pick<
 
 export interface QueueCommandContext {
   hasUI: boolean;
-  ui: Pick<ExtensionCommandContext["ui"], "confirm" | "notify" | "setStatus">;
+  ui: Pick<ExtensionCommandContext["ui"], "confirm" | "editor" | "notify" | "setStatus" | "setWidget">;
 }
 
 const SUBCOMMANDS = [
   "add",
   "list",
   "status",
+  "edit",
   "start",
   "pause",
   "resume",
@@ -59,10 +64,11 @@ function completions(prefix: string) {
     }));
   }
 
-  // Subcommand is fully typed; offer argument completions for commit/summarize
-  if ((subcommand === "commit" || subcommand === "summarize") && parts.length === 2) {
+  // Subcommand is fully typed; offer argument completions for toggles.
+  if ((subcommand === "commit" || subcommand === "summarize" || subcommand === "status") && parts.length === 2) {
     const arg = parts[1] ?? "";
-    return ["on", "off"]
+    const values = subcommand === "status" ? ["toggle", "on", "off"] : ["on", "off"];
+    return values
       .filter((a) => a.startsWith(arg))
       .map((a) => ({
         value: a,
@@ -84,8 +90,11 @@ function restOfArgs(args: string): string {
 }
 
 function parseIndex(arg: string): number | null {
-  const n = parseInt(arg, 10);
-  if (Number.isNaN(n) || n < 1) {
+  if (!/^\d+$/.test(arg)) {
+    return null;
+  }
+  const n = Number(arg);
+  if (!Number.isSafeInteger(n) || n < 1) {
     return null;
   }
   return n - 1;
@@ -106,7 +115,9 @@ export async function handleQueueCommand(
         return;
       }
       const current = host.getQueueState();
-      const result = addTask(current, rest);
+      const result = rest.toLowerCase() === "pause"
+        ? { ok: true, message: "Human pause added.", task: createPauseTask() }
+        : addTask(current, rest);
       if (!result.ok || !result.task) {
         ctx.ui.notify(result.message, "error");
         return;
@@ -115,14 +126,84 @@ export async function handleQueueCommand(
       host.updateQueueState((state) => appendTask(state, task));
       host.persistQueueState();
       host.refreshUi(ctx);
-      ctx.ui.notify(`Task added: ${formatTaskPreview(rest)}`);
+      ctx.ui.notify(task.kind === "pause" ? "Human pause added." : `Task added: ${formatTaskPreview(rest)}`);
       break;
     }
 
     case "list":
     case "status": {
+      if (cmd === "status" && rest) {
+        const current = host.getQueueState();
+        const normalized = rest.toLowerCase();
+        const value = normalized === "toggle"
+          ? !current.settings.showStatusWidget
+          : normalized === "on"
+            ? true
+            : normalized === "off"
+              ? false
+              : null;
+        if (value === null) {
+          ctx.ui.notify("Usage: /queue status [toggle|on|off]", "warning");
+          return;
+        }
+        host.updateQueueState((state) => setStatusWidgetSetting(state, value));
+        host.persistQueueState();
+        host.refreshUi(ctx);
+        ctx.ui.notify(`Live queue status ${value ? "enabled" : "disabled"}.`);
+        return;
+      }
       const box = formatQueueStatusBox(host.getQueueState());
       ctx.ui.notify(box);
+      break;
+    }
+
+    case "edit": {
+      const indexArg = rest.split(/\s+/, 1)[0] ?? "";
+      const index = parseIndex(indexArg);
+      if (index === null) {
+        ctx.ui.notify("Usage: /queue edit <index> [new objective]", "warning");
+        return;
+      }
+      const currentTask = host.getQueueState().tasks[index];
+      if (!currentTask) {
+        ctx.ui.notify("Task index out of range.", "warning");
+        return;
+      }
+      if (currentTask.status !== "pending") {
+        ctx.ui.notify("Only pending tasks can be edited.", "warning");
+        return;
+      }
+
+      const inlineObjective = rest.replace(/^\S+\s*/, "").trim();
+      let objective = inlineObjective;
+      if (!objective) {
+        if (!ctx.hasUI) {
+          ctx.ui.notify("Usage: /queue edit <index> <new objective>", "warning");
+          return;
+        }
+        const edited = await ctx.ui.editor(
+          `Edit queue entry ${index + 1}`,
+          currentTask.kind === "pause" ? "pause" : currentTask.objective,
+        );
+        if (edited === undefined) {
+          ctx.ui.notify("Queue unchanged.");
+          return;
+        }
+        objective = edited.trim();
+      }
+
+      const result = objective.toLowerCase() === "pause"
+        ? replaceWithPause(host.getQueueState(), index)
+        : editTask(host.getQueueState(), index, objective);
+      if (!result.ok || !result.state) {
+        ctx.ui.notify(result.message, "warning");
+        return;
+      }
+      const nextState = result.state;
+      host.updateQueueState(() => nextState);
+      host.persistQueueState();
+      host.refreshUi(ctx);
+      ctx.ui.notify(result.task?.kind === "pause" ? "Entry replaced with a human pause." : "Task edited.");
       break;
     }
 
@@ -220,7 +301,8 @@ export async function handleQueueCommand(
     }
 
     case "commit": {
-      const value = rest === "on" ? true : rest === "off" ? false : null;
+      const normalized = rest.toLowerCase();
+      const value = normalized === "on" ? true : normalized === "off" ? false : null;
       if (value === null) {
         ctx.ui.notify("Usage: /queue commit on|off", "warning");
         return;
@@ -233,7 +315,8 @@ export async function handleQueueCommand(
     }
 
     case "summarize": {
-      const value = rest === "on" ? true : rest === "off" ? false : null;
+      const normalized = rest.toLowerCase();
+      const value = normalized === "on" ? true : normalized === "off" ? false : null;
       if (value === null) {
         ctx.ui.notify("Usage: /queue summarize on|off", "warning");
         return;

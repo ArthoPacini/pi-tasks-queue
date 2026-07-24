@@ -7,8 +7,10 @@ import {
   advanceCursor,
   appendTask,
   clearQueue,
+  createPauseTask,
   createQueueState,
   createQueueTask,
+  editTask,
   isComplete,
   markTaskComplete,
   markTaskFailed,
@@ -37,6 +39,7 @@ test("createQueueState creates empty idle queue", () => {
   assert.equal(state.runState, "idle");
   assert.equal(state.settings.commitBetweenTasks, false);
   assert.equal(state.settings.summarizeBetweenTasks, false);
+  assert.equal(state.settings.showStatusWidget, false);
   assert.equal(state.updatedAt, 100);
 });
 
@@ -64,6 +67,26 @@ test("addTask validates objective and budget", () => {
   assert.equal(addTask(state, "fine", 10).ok, true);
   assert.equal(addTask(state, "fine", 10).task?.objective, "fine");
   assert.equal(addTask(state, " fine ").task?.objective, "fine");
+});
+
+test("createQueueTask and createPauseTask identify entry kinds", () => {
+  assert.equal(createQueueTask("work").kind, "task");
+  assert.equal(createPauseTask().kind, "pause");
+  assert.equal(createPauseTask().objective, "Pause for human");
+});
+
+test("editTask edits only pending tasks and preserves an omitted budget", () => {
+  const task = createQueueTask("old", 100, 1);
+  const state = appendTask(createQueueState(0), task, 2);
+  const edited = editTask(state, 0, "new", undefined, 3);
+
+  assert.equal(edited.ok, true);
+  assert.equal(edited.task?.objective, "new");
+  assert.equal(edited.task?.tokenBudget, 100);
+  assert.equal(edited.state?.revision, state.revision + 1);
+
+  const active = { ...state, tasks: [{ ...task, status: "active" as const }] };
+  assert.equal(editTask(active, 0, "not allowed").ok, false);
 });
 
 test("appendTask appends to tasks list", () => {

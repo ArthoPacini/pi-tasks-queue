@@ -57,7 +57,9 @@ function taskTokens(task: QueueTask): string {
 }
 
 function taskSummaryLine(task: QueueTask, index: number): string {
-  const marker = taskStatusMarker(task.status);
+  const marker = task.kind === "pause" && task.status === "active"
+    ? "[|]"
+    : taskStatusMarker(task.status);
   const duration = taskDuration(task);
   const tokens = taskTokens(task);
 
@@ -70,7 +72,8 @@ function taskSummaryLine(task: QueueTask, index: number): string {
     meta = ` (${tokens})`;
   }
 
-  let line = `  ${marker} Task ${index + 1}${meta}: ${formatTaskPreview(task.objective)}`;
+  const label = task.kind === "pause" ? "Pause" : "Task";
+  let line = `  ${marker} ${label} ${index + 1}${meta}: ${formatTaskPreview(task.objective)}`;
 
   if (task.commitSha) {
     line += ` (Commit: ${task.commitSha.slice(0, 7)})`;
@@ -112,6 +115,11 @@ export function formatQueueStatusBox(state: QueueState): string {
   lines.push(DIVIDER);
 
   lines.push("  [ QUEUE STATE ]");
+  lines.push(
+    `  Commit: ${state.settings.commitBetweenTasks ? "ON" : "OFF"}` +
+    `  |  Summarize: ${state.settings.summarizeBetweenTasks ? "ON" : "OFF"}` +
+    `  |  Live status: ${state.settings.showStatusWidget ? "ON" : "OFF"}`,
+  );
 
   if (state.tasks.length === 0) {
     lines.push("  (no tasks)");
@@ -126,7 +134,7 @@ export function formatQueueStatusBox(state: QueueState): string {
 
   // Active goal section
   const active = state.tasks[state.cursor];
-  if (active?.status === "active") {
+  if (active?.status === "active" && active.kind === "task") {
     lines.push(SEPARATOR);
     lines.push(`  [ ACTIVE GOAL: Task ${state.cursor + 1} ]`);
 
@@ -165,18 +173,33 @@ export function formatQueueFooterStatus(state: QueueState): string {
     (t) => t.status === "pending" || t.status === "active",
   ).length;
 
+  const commitMode = state.settings.commitBetweenTasks ? ", commit on" : "";
   if (state.runState === "idle" && remaining === 0) {
-    return `Queue complete (${completed}/${total})`;
+    return `Queue complete (${completed}/${total})${commitMode}`;
   }
   if (state.runState === "paused") {
-    return `Queue paused (${completed}/${total})`;
+    return `Queue paused (${completed}/${total})${commitMode}`;
   }
   // Running or idle with remaining
   const parts = [`Queue ${completed}/${total}`];
   if (skipped > 0) parts.push(`${skipped} skipped`);
   if (failed > 0) parts.push(`${failed} failed`);
   if (remaining > 0) parts.push(`${remaining} remaining`);
+  if (state.settings.commitBetweenTasks) parts.push("commit on");
   return parts.join(", ");
+}
+
+export function formatQueueWidgetLines(state: QueueState): string[] {
+  const completed = state.tasks.filter((task) => task.status === "complete").length;
+  const header = `Queue ${completed}/${state.tasks.length} · ${runStateLabel(state.runState)}` +
+    (state.settings.commitBetweenTasks ? " · commit on" : "");
+  const lines = [header];
+  for (let index = 0; index < state.tasks.length; index++) {
+    const task = state.tasks[index];
+    if (!task) continue;
+    lines.push(taskSummaryLine(task, index));
+  }
+  return lines;
 }
 
 export function formatQueueStateJson(state: QueueState): string {

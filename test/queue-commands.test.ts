@@ -17,11 +17,7 @@ import type { QueueState } from "../src/queue-types.js";
 /** Minimal context shape matching what handleQueueCommand actually uses. */
 interface MinCommandContext {
   hasUI: boolean;
-  ui: {
-    notify(message: string, type?: "info" | "warning" | "error"): void;
-    confirm(title: string, message: string): Promise<boolean>;
-    setStatus(key: string, text: string | undefined): void;
-  };
+  ui: Pick<ExtensionContext["ui"], "confirm" | "editor" | "notify" | "setStatus" | "setWidget">;
 }
 
 interface TestQueueHost {
@@ -65,6 +61,7 @@ function runCmd(
   args: string,
   notifications: string[],
   confirmResult = true,
+  editorResult?: string,
 ): void | Promise<void> {
   const ctx: MinCommandContext = {
     hasUI: true,
@@ -72,6 +69,8 @@ function runCmd(
       notify(message: string) { notifications.push(message); },
       confirm: async () => confirmResult,
       setStatus: () => {},
+      setWidget: () => {},
+      editor: async (_title: string, prefill?: string) => editorResult ?? prefill,
     },
   };
   return handleQueueCommand(host, args, ctx);
@@ -96,6 +95,17 @@ test("/queue add notification previews only the trimmed first line", async () =>
 
   assert.equal(host.getQueueState().tasks[0]?.objective, `${"x".repeat(100)}\nsecond line`);
   assert.equal(notifications.at(-1), `Task added: ${"x".repeat(57)}...`);
+});
+
+test("/queue add pause appends a human checkpoint", async () => {
+  const notifications: string[] = [];
+  const host = createTestHost();
+
+  await runCmd(host, "add pause", notifications);
+
+  assert.equal(host.getQueueState().tasks[0]?.kind, "pause");
+  assert.equal(host.getQueueState().tasks[0]?.objective, "Pause for human");
+  assert.equal(notifications.at(-1), "Human pause added.");
 });
 
 test("/queue add validates empty objective", async () => {
@@ -124,6 +134,39 @@ test("/queue status is an alias for list", async () => {
   await runCmd(host, "status", notifications);
 
   assert.ok(notifications.at(-1)?.includes("PI-QUEUE ORCHESTRATOR"));
+});
+
+test("/queue status toggle controls the persistent live widget setting", async () => {
+  const notifications: string[] = [];
+  const host = createTestHost();
+
+  await runCmd(host, "status toggle", notifications);
+  assert.equal(host.getQueueState().settings.showStatusWidget, true);
+
+  await runCmd(host, "status toggle", notifications);
+  assert.equal(host.getQueueState().settings.showStatusWidget, false);
+});
+
+test("/queue edit replaces a pending task using the editor result", async () => {
+  const notifications: string[] = [];
+  const state = appendTask(createQueueState(0), createQueueTask("old objective", null, 0));
+  const host = createTestHost(state);
+
+  await runCmd(host, "edit 1", notifications, true, "new objective");
+
+  assert.equal(host.getQueueState().tasks[0]?.objective, "new objective");
+  assert.equal(notifications.at(-1), "Task edited.");
+});
+
+test("/queue edit rejects tasks that already started", async () => {
+  const notifications: string[] = [];
+  const task = { ...createQueueTask("active"), status: "active" as const };
+  const host = createTestHost(appendTask(createQueueState(0), task));
+
+  await runCmd(host, "edit 1 replacement", notifications);
+
+  assert.equal(host.getQueueState().tasks[0]?.objective, "active");
+  assert.equal(notifications.at(-1), "Only pending tasks can be edited.");
 });
 
 test("/queue start sets runState to running", async () => {

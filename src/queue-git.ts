@@ -25,6 +25,11 @@ function commitMessage(objective: string): string {
 /** Run git status --porcelain. Returns true if there's something to commit. */
 async function hasChanges(exec: ExecFunction): Promise<boolean> {
   const result = await exec("git", ["status", "--porcelain"]);
+  if (result.code !== 0) {
+    throw new Error(
+      `git status --porcelain failed: ${result.stderr.trim() || `exit code ${result.code}`}`,
+    );
+  }
   return result.stdout.trim().length > 0;
 }
 

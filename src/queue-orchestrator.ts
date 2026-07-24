@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createQueueRuntimeController, type QueueRuntimeController } from "./queue-runtime-controller.js";
 import { registerQueueCommand } from "./queue-commands.js";
-import { registerQueueTool } from "./queue-tools.js";
+import { registerQueueTools } from "./queue-tools.js";
 import type { GoalRuntimeController } from "./goal-runtime-controller.js";
 
 export function registerQueueOrchestrator(pi: ExtensionAPI, goalController: GoalRuntimeController): void {
@@ -14,8 +14,8 @@ export function registerQueueOrchestrator(pi: ExtensionAPI, goalController: Goal
     projectRoot,
   });
 
-  // Register the read-only tool
-  registerQueueTool(pi, () => controller.getQueueState());
+  // Register model-callable queue inspection and mutation tools.
+  registerQueueTools(pi, controller);
 
   // Register /queue commands
   registerQueueCommand(pi, {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add model-callable `add_queue_tasks` and `edit_queue_task` interfaces with prompt guidance, ordered sequential mutation, persistence, and live UI refresh; natural-language requests can import task, plan, or checklist files through `read` plus `add_queue_tasks` without slash commands.
+- Add human pause checkpoints through `/queue add pause`; reaching one blocks advancement until `/queue resume`.
+- Add `/queue edit <index>` for editor-based or inline replacement of pending entries.
+- Add `/queue status toggle|on|off` for a persistent live task widget, and show commit/summarize/live settings in queue status.
+- Make commit-between-tasks await the complete git workflow in the queue project root, surface `git status` failures, record commit results before advancing, and expose commit mode in status displays.
+
 ## 0.1.35 - 2026-07-11
 
 - Update the development and documented compatibility baseline to Pi 0.80.6 after auditing current lifecycle, tool, persistence, session replacement, compaction, queued-work, concurrency, and TUI contracts.

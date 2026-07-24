@@ -46,7 +46,11 @@ export function createQueueState(now = unixSeconds()): QueueState {
     revision: 0,
     tasks: [],
     cursor: 0,
-    settings: { commitBetweenTasks: false, summarizeBetweenTasks: false },
+    settings: {
+      commitBetweenTasks: false,
+      summarizeBetweenTasks: false,
+      showStatusWidget: false,
+    },
     runState: "idle",
     updatedAt: now,
   };
@@ -59,6 +63,7 @@ export function createQueueTask(
 ): QueueTask {
   return {
     taskId: randomUUID(),
+    kind: "task",
     objective: objective.trim(),
     tokenBudget,
     status: "pending",
@@ -70,6 +75,13 @@ export function createQueueTask(
     commitWarning: null,
     summary: null,
     tokensUsed: 0,
+  };
+}
+
+export function createPauseTask(now = unixSeconds()): QueueTask {
+  return {
+    ...createQueueTask("Pause for human", null, now),
+    kind: "pause",
   };
 }
 
@@ -109,6 +121,80 @@ export function appendTask(
     },
     now,
   );
+}
+
+export function editTask(
+  state: QueueState,
+  index: number,
+  objective: string,
+  tokenBudget: number | null | undefined = undefined,
+  now = unixSeconds(),
+): QueueTaskResult {
+  if (index < 0 || index >= state.tasks.length) {
+    return { ok: false, message: "Task index out of range.", task: null };
+  }
+
+  const task = state.tasks[index];
+  if (!task) {
+    return { ok: false, message: "Task not found.", task: null };
+  }
+  if (task.status !== "pending") {
+    return { ok: false, message: "Only pending tasks can be edited.", task: null };
+  }
+
+  const objectiveError = validateObjective(objective);
+  if (objectiveError) {
+    return { ok: false, message: objectiveError, task: null };
+  }
+  const budgetError = validateTokenBudget(tokenBudget);
+  if (budgetError) {
+    return { ok: false, message: budgetError, task: null };
+  }
+
+  const edited: QueueTask = {
+    ...task,
+    kind: "task",
+    objective: objective.trim(),
+    tokenBudget: tokenBudget === undefined ? task.tokenBudget : tokenBudget,
+  };
+  const nextTasks = state.tasks.map((candidate, taskIndex) => taskIndex === index ? edited : candidate);
+  return {
+    ok: true,
+    message: "Task edited.",
+    task: edited,
+    state: bumpRevision({ ...state, tasks: nextTasks }, now),
+  };
+}
+
+export function replaceWithPause(
+  state: QueueState,
+  index: number,
+  now = unixSeconds(),
+): QueueTaskResult {
+  if (index < 0 || index >= state.tasks.length) {
+    return { ok: false, message: "Task index out of range.", task: null };
+  }
+  const task = state.tasks[index];
+  if (!task) {
+    return { ok: false, message: "Task not found.", task: null };
+  }
+  if (task.status !== "pending") {
+    return { ok: false, message: "Only pending tasks can be edited.", task: null };
+  }
+
+  const edited: QueueTask = {
+    ...task,
+    kind: "pause",
+    objective: "Pause for human",
+    tokenBudget: null,
+  };
+  const nextTasks = state.tasks.map((candidate, taskIndex) => taskIndex === index ? edited : candidate);
+  return {
+    ok: true,
+    message: "Task replaced with a human pause.",
+    task: edited,
+    state: bumpRevision({ ...state, tasks: nextTasks }, now),
+  };
 }
 
 export function removeTask(state: QueueState, index: number, now = unixSeconds()): QueueTaskResult {
@@ -365,6 +451,13 @@ export function toggleSummarizeSetting(state: QueueState, now = unixSeconds()): 
 export function setSummarizeSetting(state: QueueState, value: boolean, now = unixSeconds()): QueueState {
   return bumpRevision(
     { ...state, settings: { ...state.settings, summarizeBetweenTasks: value } },
+    now,
+  );
+}
+
+export function setStatusWidgetSetting(state: QueueState, value: boolean, now = unixSeconds()): QueueState {
+  return bumpRevision(
+    { ...state, settings: { ...state.settings, showStatusWidget: value } },
     now,
   );
 }

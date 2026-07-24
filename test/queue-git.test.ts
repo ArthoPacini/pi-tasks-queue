@@ -47,6 +47,16 @@ test("commitTaskWork stages and commits when there are changes", async () => {
   assert.equal(result.warning, null);
 });
 
+test("commitTaskWork reports a git status failure instead of silently skipping", async () => {
+  const result = await commitTaskWork(
+    fakeExec([{ stdout: "", stderr: "fatal: not a git repository", code: 128 }]),
+    "Add feature X",
+  );
+
+  assert.equal(result.committed, false);
+  assert.match(result.warning ?? "", /git status --porcelain failed/);
+});
+
 test("commitTaskWork records warning when git add fails", async () => {
   const exec = fakeExec([
     { stdout: " M src/main.ts" },

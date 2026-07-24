@@ -12,10 +12,12 @@ import {
   addTask,
   appendTask,
   createQueueState,
+  createPauseTask,
   createQueueTask,
   markTaskStarted,
   setCommitSetting,
   setRunState,
+  setStatusWidgetSetting,
   setSummarizeSetting,
 } from "../src/queue-state.js";
 import type { QueueState } from "../src/queue-types.js";
@@ -26,21 +28,26 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "queue-runtime-test-"));
 }
 
-function runtimeFakes(initialGoal: ThreadGoal | null = null) {
-  const handlers = new Map<string, (event: object, ctx: ExtensionContext) => void>();
+function runtimeFakes(
+  initialGoal: ThreadGoal | null = null,
+  exec: ExtensionAPI["exec"] = async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+) {
+  const handlers = new Map<string, (event: object, ctx: ExtensionContext) => void | Promise<void>>();
   const statuses: Array<string | undefined> = [];
+  const widgets: Array<string[] | undefined> = [];
+  const notifications: string[] = [];
   const sentMessages: unknown[] = [];
   let goal = initialGoal;
   let clearedGoals = 0;
   let resumedGoals = 0;
 
-  const on = ((event: string, handler: (event: object, ctx: ExtensionContext) => void) => {
+  const on = ((event: string, handler: (event: object, ctx: ExtensionContext) => void | Promise<void>) => {
     handlers.set(event, handler);
   }) as ExtensionAPI["on"];
   const pi = {
     ...({} as ExtensionAPI),
     appendEntry() {},
-    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+    exec,
     on,
     sendMessage(message: unknown) {
       sentMessages.push(message);
@@ -62,11 +69,16 @@ function runtimeFakes(initialGoal: ThreadGoal | null = null) {
       return { ok: true, message: "Goal resumed.", goal };
     },
   };
+  const setWidget: ExtensionContext["ui"]["setWidget"] = (_key, content) => {
+    widgets.push(Array.isArray(content) ? content : undefined);
+  };
   const ctx = {
     ...({} as ExtensionContext),
     ui: {
       ...({} as ExtensionContext["ui"]),
       setStatus: (_key: string, status: string | undefined) => { statuses.push(status); },
+      setWidget,
+      notify: (message: string) => { notifications.push(message); },
     },
   };
 
@@ -76,6 +88,8 @@ function runtimeFakes(initialGoal: ThreadGoal | null = null) {
     ctx,
     handlers,
     statuses,
+    widgets,
+    notifications,
     sentMessages,
     getGoal: () => goal,
     getClearedGoals: () => clearedGoals,
@@ -94,6 +108,20 @@ test("session startup restores the queue footer status", () => {
   fakes.handlers.get("session_start")?.({}, fakes.ctx);
 
   assert.equal(fakes.statuses.at(-1), "Queue 0/1, 1 remaining");
+});
+
+test("session startup restores the optional live queue widget", () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("visible task"));
+  state = setStatusWidgetSetting(state, true);
+  persistence.save(state);
+  const fakes = runtimeFakes();
+
+  createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+  fakes.handlers.get("session_start")?.({}, fakes.ctx);
+
+  assert.match(fakes.widgets.at(-1)?.join("\n") ?? "", /visible task/);
 });
 
 test("session startup restores a running active task when its session goal is missing", () => {
@@ -156,6 +184,68 @@ test("skipping an active task clears its goal and starts the next task", () => {
   assert.equal(fakes.getClearedGoals(), 1);
   assert.equal(fakes.getGoal()?.objective, "second task");
   assert.equal(fakes.sentMessages.length, 1);
+});
+
+test("a queued human pause blocks advancement until resume", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createPauseTask());
+  state = appendTask(state, createQueueTask("after approval"));
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "session").state!;
+  persistence.save(state);
+
+  const completedGoal = { ...replaceGoal("first task").goal!, status: "complete" as const };
+  const fakes = runtimeFakes(completedGoal);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
+
+  assert.equal(controller.getQueueState().tasks[0]?.status, "complete");
+  assert.equal(controller.getQueueState().tasks[1]?.status, "active");
+  assert.equal(controller.getQueueState().tasks[1]?.kind, "pause");
+  assert.equal(controller.getQueueState().tasks[2]?.status, "pending");
+  assert.equal(controller.getQueueState().runState, "paused");
+  assert.match(fakes.notifications.at(-1) ?? "", /human pause/);
+
+  const resumed = controller.resume(fakes.ctx);
+  assert.equal(resumed.ok, true);
+  assert.equal(controller.getQueueState().tasks[1]?.status, "complete");
+  assert.equal(controller.getQueueState().tasks[2]?.status, "active");
+  assert.equal(controller.getQueueState().runState, "running");
+  assert.equal(fakes.getGoal()?.objective, "after approval");
+});
+
+test("agent_end awaits commit-between-tasks and records the commit", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("commit this task"));
+  state = setCommitSetting(state, true);
+  state = setRunState(state, "running");
+  state = markTaskStarted(state, "session").state!;
+  persistence.save(state);
+
+  const calls: Array<{ command: string; args: string[]; cwd: string | undefined }> = [];
+  const outputs = [" M changed.txt\n", "", "", "abc123def456\n"];
+  const exec: ExtensionAPI["exec"] = async (command, args, options) => {
+    calls.push({ command, args, cwd: options?.cwd });
+    return { stdout: outputs[calls.length - 1] ?? "", stderr: "", code: 0, killed: false };
+  };
+  const completedGoal = { ...replaceGoal("commit this task").goal!, status: "complete" as const };
+  const fakes = runtimeFakes(completedGoal, exec);
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+
+  await fakes.handlers.get("agent_end")?.({}, fakes.ctx);
+
+  assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
+    ["git", "status", "--porcelain"],
+    ["git", "add", "-A"],
+    ["git", "commit", "-m", "pi-queue: commit this task"],
+    ["git", "rev-parse", "HEAD"],
+  ]);
+  assert.ok(calls.every((call) => call.cwd === dir));
+  assert.equal(controller.getQueueState().tasks[0]?.commitSha, "abc123def456");
 });
 
 test("queue persistence round-trips state through file", () => {

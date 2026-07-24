@@ -5,10 +5,11 @@ import {
   formatQueueFooterStatus,
   formatQueueStateJson,
   formatQueueStatusBox,
+  formatQueueWidgetLines,
   formatQueueTaskStatusList,
   formatTaskPreview,
 } from "../src/queue-format.js";
-import { createQueueState, createQueueTask, appendTask } from "../src/queue-state.js";
+import { appendTask, createPauseTask, createQueueState, createQueueTask, setCommitSetting } from "../src/queue-state.js";
 
 test("formatQueueStatusBox shows idle empty queue", () => {
   const state = createQueueState(100);
@@ -17,6 +18,7 @@ test("formatQueueStatusBox shows idle empty queue", () => {
   assert.match(box, /PI-QUEUE ORCHESTRATOR/);
   assert.match(box, /\[ IDLE \]/);
   assert.match(box, /\(no tasks\)/);
+  assert.match(box, /Commit: OFF/);
 });
 
 test("formatQueueStatusBox shows tasks and active goal", () => {
@@ -73,6 +75,16 @@ test("formatQueueStatusBox shows paused state", () => {
   const state = { ...createQueueState(0), runState: "paused" as const };
   const box = formatQueueStatusBox(state);
   assert.match(box, /\[ PAUSED \]/);
+});
+
+test("status and live widget show commit mode and human pauses", () => {
+  let state = appendTask(createQueueState(0), createPauseTask(0));
+  state = setCommitSetting(state, true, 1);
+
+  assert.match(formatQueueStatusBox(state), /Commit: ON/);
+  assert.match(formatQueueStatusBox(state), /Pause 1: Pause for human/);
+  assert.match(formatQueueWidgetLines(state).join("\n"), /commit on/);
+  assert.match(formatQueueWidgetLines(state).join("\n"), /Pause 1/);
 });
 
 test("formatQueueFooterStatus shows an empty queue", () => {

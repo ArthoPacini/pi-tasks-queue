@@ -132,6 +132,23 @@ test("load after reset bootstraps empty state", () => {
   assert.equal(loaded.runState, "idle");
 });
 
+test("load supplies defaults for queue files written before kinds and live status", () => {
+  const dir = tempProjectDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  const state = appendTask(createQueueState(0), createQueueTask("legacy task", null, 0), 1);
+  const task = state.tasks[0];
+  assert.ok(task);
+  const { kind: _kind, ...legacyTask } = task;
+  const { showStatusWidget: _showStatusWidget, ...legacySettings } = state.settings;
+  const legacyState = { ...state, tasks: [legacyTask], settings: legacySettings };
+  mkdirSync(join(dir, ".pi", "pi-queue"), { recursive: true });
+  writeFileSync(persistence.queuePath, JSON.stringify(legacyState));
+
+  const loaded = persistence.load();
+  assert.equal(loaded.tasks[0]?.kind, "task");
+  assert.equal(loaded.settings.showStatusWidget, false);
+});
+
 test("corrupt file throws on parse", () => {
   const dir = tempProjectDir();
   const persistence = createQueuePersistence({ projectRoot: dir });

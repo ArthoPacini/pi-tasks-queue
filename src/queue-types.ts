@@ -3,9 +3,11 @@ export const QUEUE_CUSTOM_ENTRY_TYPE = "pi-queue";
 export const MAX_OBJECTIVE_CHARS = 8000;
 
 export type QueueTaskStatus = "pending" | "active" | "complete" | "failed" | "skipped";
+export type QueueTaskKind = "task" | "pause";
 
 export interface QueueTask {
   taskId: string;
+  kind: QueueTaskKind;
   objective: string;
   tokenBudget: number | null;
   status: QueueTaskStatus;
@@ -22,6 +24,7 @@ export interface QueueTask {
 export interface QueueSettings {
   commitBetweenTasks: boolean;
   summarizeBetweenTasks: boolean;
+  showStatusWidget: boolean;
 }
 
 export type QueueRunState = "idle" | "running" | "paused";

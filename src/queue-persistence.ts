@@ -10,6 +10,21 @@ export interface QueuePersistenceDeps {
   projectRoot: string;
 }
 
+export function normalizeQueueState(state: QueueState): QueueState {
+  return {
+    ...state,
+    tasks: state.tasks.map((task) => ({
+      ...task,
+      kind: task.kind ?? "task",
+    })),
+    settings: {
+      commitBetweenTasks: state.settings.commitBetweenTasks ?? false,
+      summarizeBetweenTasks: state.settings.summarizeBetweenTasks ?? false,
+      showStatusWidget: state.settings.showStatusWidget ?? false,
+    },
+  };
+}
+
 function isDescendant(ancestor: string, candidate: string): boolean {
   const relativePath = relative(ancestor, candidate);
   return !relativePath.startsWith("..") && !sep.startsWith(relativePath);
@@ -51,8 +66,9 @@ export function createQueuePersistence(deps: QueuePersistenceDeps) {
     if (parsed.version !== 1) {
       throw new Error(`Unsupported queue state version: ${parsed.version}`);
     }
-    lastKnownRevision = parsed.revision;
-    return parsed;
+    const normalized = normalizeQueueState(parsed);
+    lastKnownRevision = normalized.revision;
+    return normalized;
   };
 
   const save = (state: QueueState): boolean => {

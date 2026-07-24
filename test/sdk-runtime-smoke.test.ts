@@ -65,6 +65,15 @@ test("SDK runtime emits a continuation after willRetry compaction when no retry 
 
   try {
     const runner = session.extensionRunner;
+    assert.ok(runner.getToolDefinition("get_queue_status"));
+    const addQueueTasks = runner.getToolDefinition("add_queue_tasks");
+    assert.ok(addQueueTasks);
+    assert.match(
+      addQueueTasks.promptGuidelines?.join("\n") ?? "",
+      /read a task, plan, or checklist file.*use read.*call add_queue_tasks/s,
+    );
+    assert.match(addQueueTasks.promptGuidelines?.join("\n") ?? "", /do not use \/queue/);
+    assert.ok(runner.getToolDefinition("edit_queue_task"));
     const createGoal = runner.getToolDefinition("create_goal");
     assert.ok(createGoal);
     const result = await createGoal.execute(
