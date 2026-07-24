@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix automatic queue advancement after a task completes: keep the fresh-session handoff inside Pi's supported `newSession({ withSession })` command-context chain instead of sending a private `/queue` string as a model-visible follow-up. The queue now waits for each fresh task session to settle, reloads persisted state, and replaces the session again for the next pending entry without falsely remaining `running` while idle.
 - Add model-callable `add_queue_tasks` and `edit_queue_task` interfaces with prompt guidance, ordered sequential mutation, persistence, and live UI refresh; natural-language requests can import task, plan, or checklist files through `read` plus `add_queue_tasks` without slash commands.
 - Add human pause checkpoints through `/queue add pause`; reaching one blocks advancement until `/queue resume`.
 - Add `/queue edit <index>` for editor-based or inline replacement of pending entries.

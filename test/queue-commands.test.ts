@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import type {
-  ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import test from "node:test";
 
-import { handleQueueCommand, registerQueueCommand } from "../src/queue-commands.js";
-import { QUEUE_NEW_SESSION_SUBCOMMAND } from "../src/queue-types.js";
+import { handleQueueCommand } from "../src/queue-commands.js";
 import {
   advanceCursor,
   appendTask,
@@ -31,8 +29,8 @@ interface TestQueueHost {
   persistQueueState(): void;
   refreshUi(ctx: ExtensionContext): void;
   start(ctx: ExtensionCommandContext): Promise<void>;
-  resume(ctx: ExtensionContext): ReturnType<typeof resumeQueue>;
-  skip(ctx: ExtensionContext): ReturnType<typeof skipCurrentTask>;
+  resume(ctx: ExtensionCommandContext): Promise<ReturnType<typeof resumeQueue>>;
+  skip(ctx: ExtensionCommandContext): Promise<ReturnType<typeof skipCurrentTask>>;
   startNextTaskInFreshSession(expectedTaskId: string, ctx: ExtensionCommandContext): Promise<ReturnType<typeof resumeQueue>>;
 }
 
@@ -49,12 +47,12 @@ function createTestHost(initial: QueueState = createQueueState()): TestQueueHost
     start: async () => {
       state = setRunState(state, "running");
     },
-    resume: () => {
+    resume: async () => {
       const result = resumeQueue(state);
       if (result.state) state = result.state;
       return result;
     },
-    skip: () => {
+    skip: async () => {
       const result = skipCurrentTask(state);
       if (result.state) state = advanceCursor(result.state).state;
       return result;
@@ -308,28 +306,6 @@ test("/queue summarize on|off toggles summarize setting", async () => {
 
   await runCmd(host, "summarize off", notifications);
   assert.equal(host.getQueueState().settings.summarizeBetweenTasks, false);
-});
-
-test("private transition subcommand is routed to fresh-session startup", async () => {
-  const host = createTestHost();
-  let commandHandler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
-  const pi = {
-    ...({} as ExtensionAPI),
-    registerCommand(_name: string, options: { handler: typeof commandHandler }) {
-      commandHandler = options.handler;
-    },
-  } as ExtensionAPI;
-  let receivedTaskId: string | undefined;
-  host.startNextTaskInFreshSession = async (taskId) => {
-    receivedTaskId = taskId;
-    return { ok: true, message: "transitioned", state: host.getQueueState() };
-  };
-  registerQueueCommand(pi, host);
-
-  assert.ok(commandHandler);
-  await commandHandler(`${QUEUE_NEW_SESSION_SUBCOMMAND} task-123`, {} as ExtensionCommandContext);
-
-  assert.equal(receivedTaskId, "task-123");
 });
 
 test("/queue unknown subcommand shows help", async () => {

@@ -2,7 +2,6 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 import { formatQueueStatusBox, formatTaskPreview } from "./queue-format.js";
 import type { QueueRuntimeController } from "./queue-runtime-controller.js";
-import { QUEUE_NEW_SESSION_SUBCOMMAND } from "./queue-types.js";
 import {
   addTask,
   appendTask,
@@ -235,7 +234,7 @@ export async function handleQueueCommand(
     }
 
     case "resume": {
-      const result = host.resume(ctx as Parameters<typeof host.resume>[0]);
+      const result = await host.resume(ctx as Parameters<typeof host.resume>[0]);
       if (!result.ok) {
         ctx.ui.notify(result.message, "warning");
         return;
@@ -246,7 +245,7 @@ export async function handleQueueCommand(
     }
 
     case "skip": {
-      const result = host.skip(ctx as Parameters<typeof host.skip>[0]);
+      const result = await host.skip(ctx as Parameters<typeof host.skip>[0]);
       if (!result.ok) {
         ctx.ui.notify(result.message, "warning");
         return;
@@ -338,23 +337,13 @@ export async function handleQueueCommand(
   }
 }
 
-export function registerQueueCommand(
-  pi: ExtensionAPI,
-  host: QueueCommandHost & Pick<QueueRuntimeController, "startNextTaskInFreshSession">,
-): void {
+export function registerQueueCommand(pi: ExtensionAPI, host: QueueCommandHost): void {
   pi.registerCommand("queue", {
     description: "Manage the multi-task queue.",
     getArgumentCompletions(argumentPrefix) {
       return completions(argumentPrefix.trim());
     },
     async handler(args: string, ctx: ExtensionCommandContext) {
-      if (firstArg(args) === QUEUE_NEW_SESSION_SUBCOMMAND) {
-        const expectedTaskId = restOfArgs(args);
-        if (expectedTaskId) {
-          await host.startNextTaskInFreshSession(expectedTaskId, ctx);
-        }
-        return;
-      }
       await handleQueueCommand(host, args, ctx as Parameters<typeof handleQueueCommand>[2]);
     },
   });

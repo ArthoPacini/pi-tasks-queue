@@ -14,10 +14,12 @@ import { createQueuePersistence } from "../src/queue-persistence.js";
 import { createQueueRuntimeControllerForTesting } from "../src/queue-orchestrator.js";
 import {
   addTask,
+  advanceCursor,
   appendTask,
   createQueueState,
   createPauseTask,
   createQueueTask,
+  markTaskComplete,
   markTaskStarted,
   setCommitSetting,
   setRunState,
@@ -94,10 +96,17 @@ function runtimeFakes(
     },
   };
 
+  const commandCtx = {
+    ...ctx,
+    waitForIdle: async () => {},
+    newSession: async () => ({ cancelled: false }),
+  } as ExtensionCommandContext;
+
   return {
     pi,
     goalController,
     ctx,
+    commandCtx,
     handlers,
     statuses,
     widgets,
@@ -189,7 +198,7 @@ test("starting a queue replaces the setup session before task 1", async () => {
   assert.equal(replacementFakes.getGoal()?.objective, "fresh first task");
 });
 
-test("resuming a paused queue also resumes its paused goal", () => {
+test("resuming a paused queue also resumes its paused goal", async () => {
   const dir = tempDir();
   const persistence = createQueuePersistence({ projectRoot: dir });
   let state = appendTask(persistence.load(), createQueueTask("paused task"));
@@ -201,7 +210,7 @@ test("resuming a paused queue also resumes its paused goal", () => {
   const fakes = runtimeFakes(pausedGoal);
   const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
 
-  const result = controller.resume(fakes.ctx);
+  const result = await controller.resume(fakes.commandCtx);
 
   assert.equal(result.ok, true);
   assert.equal(controller.getQueueState().runState, "running");
@@ -209,7 +218,7 @@ test("resuming a paused queue also resumes its paused goal", () => {
   assert.equal(fakes.getResumedGoals(), 1);
 });
 
-test("skipping an active task clears its goal and replaces the session before the next task", () => {
+test("skipping an active task clears its goal and replaces the session before the next task", async () => {
   const dir = tempDir();
   const persistence = createQueuePersistence({ projectRoot: dir });
   let state = appendTask(persistence.load(), createQueueTask("first task"));
@@ -222,7 +231,7 @@ test("skipping an active task clears its goal and replaces the session before th
   const fakes = runtimeFakes(firstGoal);
   const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
 
-  const result = controller.skip(fakes.ctx);
+  const result = await controller.skip(fakes.commandCtx);
 
   assert.equal(result.ok, true);
   assert.equal(controller.getQueueState().tasks[0]?.status, "skipped");
@@ -231,7 +240,6 @@ test("skipping an active task clears its goal and replaces the session before th
   assert.equal(fakes.getClearedGoals(), 1);
   assert.equal(fakes.getGoal(), null);
   assert.equal(fakes.sentMessages.length, 0);
-  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
 
   const replacementFakes = runtimeFakes();
   const replacementController = createQueueRuntimeControllerForTesting(
@@ -265,7 +273,6 @@ test("a queued human pause blocks advancement until resume", async () => {
   assert.equal(controller.getQueueState().tasks[1]?.kind, "pause");
   assert.equal(controller.getQueueState().tasks[2]?.status, "pending");
   assert.equal(controller.getQueueState().runState, "running");
-  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
 
   // Session replacement reloads the extension; session_start in the fresh
   // instance reaches the pause without carrying the completed task's context.
@@ -281,12 +288,11 @@ test("a queued human pause blocks advancement until resume", async () => {
   assert.equal(replacementController.getQueueState().runState, "paused");
   assert.match(replacementFakes.notifications.at(-1) ?? "", /human pause/);
 
-  const resumed = replacementController.resume(replacementFakes.ctx);
+  const resumed = await replacementController.resume(replacementFakes.commandCtx);
   assert.equal(resumed.ok, true);
   assert.equal(replacementController.getQueueState().tasks[1]?.status, "complete");
   assert.equal(replacementController.getQueueState().tasks[2]?.status, "pending");
   assert.equal(replacementController.getQueueState().runState, "running");
-  assert.match(String(replacementFakes.sentUserMessages.at(-1)?.content ?? ""), /__start-next-session/);
 
   const afterPauseFakes = runtimeFakes();
   const afterPauseController = createQueueRuntimeControllerForTesting(
@@ -318,8 +324,7 @@ test("completed tasks replace the session before the next task starts", async ()
   assert.equal(pendingTask.status, "pending");
   assert.equal(fakes.getGoal()?.objective, "first task");
   assert.equal(fakes.sentMessages.length, 0, "next task must not start in the old session");
-  assert.deepEqual(fakes.sentUserMessages.at(-1)?.options, { deliverAs: "followUp" });
-  assert.match(String(fakes.sentUserMessages.at(-1)?.content ?? ""), new RegExp(pendingTask.taskId));
+  assert.equal(fakes.sentUserMessages.length, 0, "queue control must never be sent to the model as a user message");
 
   let waitedForIdle = 0;
   let newSessionParent: string | undefined;
@@ -351,6 +356,59 @@ test("completed tasks replace the session before the next task starts", async ()
   assert.equal(replacementFakes.sentMessages.length, 1);
 });
 
+test("the command-owned session chain advances across every pending task", async () => {
+  const dir = tempDir();
+  const persistence = createQueuePersistence({ projectRoot: dir });
+  let state = appendTask(persistence.load(), createQueueTask("first task"));
+  state = appendTask(state, createQueueTask("second task"));
+  state = setRunState(state, "running");
+  persistence.save(state);
+
+  const fakes = runtimeFakes();
+  const controller = createQueueRuntimeControllerForTesting(fakes.pi, fakes.goalController, dir);
+  const transitionPersistence = createQueuePersistence({ projectRoot: dir });
+  let replacementCount = 0;
+
+  const replaceSession: ExtensionCommandContext["newSession"] = async (options) => {
+    replacementCount++;
+
+    // Simulate the replacement runtime's session_start plus a completed goal
+    // run before its withSession callback regains control.
+    let latest = transitionPersistence.load();
+    const started = markTaskStarted(latest, `fresh-session-${replacementCount}`);
+    assert.ok(started.ok && started.state);
+    latest = started.state;
+    const completed = markTaskComplete(latest);
+    assert.ok(completed.ok && completed.state);
+    latest = advanceCursor(completed.state).state;
+    transitionPersistence.save(latest);
+
+    const freshCtx = {
+      ...fakes.commandCtx,
+      newSession: replaceSession,
+      sendMessage: async () => {},
+      sendUserMessage: async () => {},
+    };
+    await options?.withSession?.(freshCtx);
+    return { cancelled: false };
+  };
+  const commandCtx = {
+    ...fakes.commandCtx,
+    newSession: replaceSession,
+  } as ExtensionCommandContext;
+
+  const firstTaskId = controller.getQueueState().tasks[0]?.taskId;
+  assert.ok(firstTaskId);
+  const transition = await controller.startNextTaskInFreshSession(firstTaskId, commandCtx);
+
+  assert.equal(transition.ok, true);
+  assert.equal(replacementCount, 2);
+  const finalState = transitionPersistence.load();
+  assert.deepEqual(finalState.tasks.map((task) => task.status), ["complete", "complete"]);
+  assert.equal(finalState.runState, "idle");
+  assert.equal(fakes.sentUserMessages.length, 0);
+});
+
 test("cancelled session replacement pauses instead of reusing the old context", async () => {
   const dir = tempDir();
   const persistence = createQueuePersistence({ projectRoot: dir });
@@ -379,12 +437,11 @@ test("cancelled session replacement pauses instead of reusing the old context", 
   assert.equal(fakes.getGoal()?.objective, "first task");
   assert.match(fakes.notifications.at(-1) ?? "", /queue is paused/);
 
-  const queuedBeforeResume = fakes.sentUserMessages.length;
-  const resumed = controller.resume(fakes.ctx);
+  const resumed = await controller.resume(fakes.commandCtx);
   assert.equal(resumed.ok, true);
   assert.equal(controller.getQueueState().tasks[1]?.status, "pending");
   assert.equal(fakes.sentMessages.length, 0);
-  assert.equal(fakes.sentUserMessages.length, queuedBeforeResume + 1);
+  assert.equal(fakes.sentUserMessages.length, 0);
 });
 
 test("summarize mode carries only the captured summary into the fresh task session", async () => {

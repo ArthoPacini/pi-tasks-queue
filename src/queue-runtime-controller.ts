@@ -6,7 +6,7 @@ import type {
 
 import { createQueuePersistence } from "./queue-persistence.js";
 import type { QueueState, QueueStateResult } from "./queue-types.js";
-import { QUEUE_CUSTOM_ENTRY_TYPE, QUEUE_NEW_SESSION_SUBCOMMAND } from "./queue-types.js";
+import { QUEUE_CUSTOM_ENTRY_TYPE } from "./queue-types.js";
 import {
   advanceCursor,
   markTaskComplete,
@@ -49,9 +49,9 @@ export interface QueueRuntimeController {
   /** Set runState to "running" and start the first entry in a fresh session. */
   start(ctx: ExtensionCommandContext): Promise<void>;
   /** Resume and immediately kick off the next pending task, if any. */
-  resume(ctx: ExtensionContext): QueueStateResult;
+  resume(ctx: ExtensionCommandContext): Promise<QueueStateResult>;
   /** Skip the current task and advance the queue. */
-  skip(ctx: ExtensionContext): QueueStateResult;
+  skip(ctx: ExtensionCommandContext): Promise<QueueStateResult>;
   /** Replace the current session before starting the expected pending queue entry. */
   startNextTaskInFreshSession(expectedTaskId: string, ctx: ExtensionCommandContext): Promise<QueueStateResult>;
 }
@@ -101,11 +101,6 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
   loadState();
 
-  /** Ask the registered /queue command to perform a safe session replacement once Pi is idle. */
-  const requestFreshSession = (taskId: string): void => {
-    deps.pi.sendUserMessage(`/queue ${QUEUE_NEW_SESSION_SUBCOMMAND} ${taskId}`, { deliverAs: "followUp" });
-  };
-
   /** Queue a continuation turn for the active goal. */
   const queueGoalTurn = (ctx: ExtensionContext): void => {
     const goal = deps.goalController.getGoalForDisplay();
@@ -135,7 +130,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     }
   };
 
-  const resume = (ctx: ExtensionContext): QueueStateResult => {
+  const resume = async (ctx: ExtensionCommandContext): Promise<QueueStateResult> => {
     const result = resumeQueue(queueState);
     if (!result.ok || !result.state) {
       return result;
@@ -163,19 +158,19 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
 
     const nextEntry = queueState.tasks[queueState.cursor];
     const currentGoal = deps.goalController.getGoalForDisplay();
+    persistQueueState();
+    refreshUi(ctx);
     if (nextEntry?.status === "pending" && (!currentGoal || currentGoal.status === "complete")) {
       // Entering a pending task always crosses a session boundary. This covers
       // cancelled replacements and tasks that follow a human pause.
-      requestFreshSession(nextEntry.taskId);
-    } else {
-      startKickoff(ctx);
+      return startNextTaskInFreshSession(nextEntry.taskId, ctx);
     }
-    persistQueueState();
-    refreshUi(ctx);
+
+    startKickoff(ctx);
     return { ...result, state: queueState };
   };
 
-  const skip = (ctx: ExtensionContext): QueueStateResult => {
+  const skip = async (ctx: ExtensionCommandContext): Promise<QueueStateResult> => {
     const skippedTask = queueState.tasks[queueState.cursor];
     const skippedAgentTaskWasActive = skippedTask?.status === "active" && skippedTask.kind === "task";
     const skippedHumanPause = skippedTask?.status === "active" && skippedTask.kind === "pause";
@@ -197,7 +192,7 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
     refreshUi(ctx);
     const nextEntry = queueState.tasks[queueState.cursor];
     if (nextEntry?.status === "pending") {
-      requestFreshSession(nextEntry.taskId);
+      return startNextTaskInFreshSession(nextEntry.taskId, ctx);
     }
     return { ...result, state: queueState };
   };
@@ -372,15 +367,22 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       return;
     }
 
-    // Session-control methods are intentionally unavailable in event handlers.
-    // Route through a private extension command, which waits until Pi is idle
-    // and replaces the session before the next queue entry starts.
-    const nextTask = queueState.tasks[queueState.cursor];
+    // A command-owned fresh-session chain performs the next replacement after
+    // this run settles. Event handlers cannot call session-control methods.
     persistQueueState();
     refreshUi(ctx);
-    if (nextTask) {
-      appendAuditEntry("session_transition_requested", { taskId: nextTask.taskId, cursor: queueState.cursor });
-      requestFreshSession(nextTask.taskId);
+  };
+
+  const continueFreshSessionChain = async (ctx: ExtensionCommandContext): Promise<void> => {
+    // session_start in the replacement runtime marks the pending entry active
+    // and queues its goal turn. Wait for that complete autonomous run, including
+    // goal continuations, before deciding whether another replacement is due.
+    await ctx.waitForIdle();
+
+    queueState = persistence.load();
+    const nextTask = queueState.tasks[queueState.cursor];
+    if (queueState.runState === "running" && nextTask?.status === "pending") {
+      await startNextTaskInFreshSession(nextTask.taskId, ctx);
     }
   };
 
@@ -390,6 +392,10 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
   ): Promise<QueueStateResult> => {
     await ctx.waitForIdle();
 
+    // This function can continue from a withSession callback owned by an older
+    // extension instance. Reload from disk instead of trusting that instance's
+    // in-memory snapshot, and use only the replacement ctx for session work.
+    queueState = persistence.load();
     const nextTask = queueState.tasks[queueState.cursor];
     if (
       queueState.runState !== "running" ||
@@ -406,15 +412,17 @@ export function createQueueRuntimeController(deps: QueueRuntimeControllerDeps): 
       message: "Started the next queue entry in a fresh session.",
       state: queueState,
     };
-    const replacement = await ctx.newSession(parentSession ? { parentSession } : undefined);
+    const replacement = await ctx.newSession({
+      ...(parentSession ? { parentSession } : {}),
+      withSession: continueFreshSessionChain,
+    });
     if (!replacement.cancelled) {
-      // The old extension instance and ctx are stale after replacement. The new
-      // instance loads queue.json and starts the pending entry from session_start.
+      // The callback above follows the queue through every subsequent fresh
+      // session. Nothing after replacement may use the now-stale command ctx.
       return success;
     }
 
     queueState = setRunState(queueState, "paused");
-    appendAuditEntry("session_transition_cancelled", { taskId: expectedTaskId, cursor: queueState.cursor });
     persistQueueState();
     refreshUi(ctx);
     try {
